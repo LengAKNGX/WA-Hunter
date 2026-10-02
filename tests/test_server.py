@@ -36,5 +36,23 @@ class OracleValidationTests(unittest.TestCase):
             })
 
 
+class PaymentAccessTests(unittest.TestCase):
+    def test_delivery_is_locked_until_paid(self):
+        row = {"paid_at": None}
+        self.assertFalse(app.can_view_delivery(row, {"is_admin": 0}))
+        self.assertTrue(app.can_view_delivery(row, {"is_admin": 1}))
+        row["paid_at"] = 123
+        self.assertTrue(app.can_view_delivery(row, {"is_admin": 0}))
+
+    def test_payment_state_tracks_claim(self):
+        row = {
+            "paid_at": None,
+            "payment_claim": "1234",
+            "payment_requested_at": 100,
+            "status": "found",
+        }
+        self.assertIn("等待管理员核对", app.payment_state(row))
+
+
 if __name__ == "__main__":
     unittest.main()

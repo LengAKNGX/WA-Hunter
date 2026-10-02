@@ -109,7 +109,8 @@ Issue、附件和评论默认公开。不要上传私有作业、比赛中仍保
 题面与候选解，由 DeepSeek Flash 生成待审核 Oracle。任务通过单并发后台队列进入
 Firejail，在私有结果页查看反例和报告。候选解不会发送给模型。生产迁移、安全边界
 与回滚方案见 [docs/SERVER_DEPLOYMENT.md](docs/SERVER_DEPLOYMENT.md)，服务端源码见
-[server/](server/)。
+[server/](server/)。找到的反例先由管理员确认，再通过人工核对的 ¥1 付款流程解锁；
+收款码和付款凭据不进入公开仓库。
 
 ## 开发与许可 / Development and license
 

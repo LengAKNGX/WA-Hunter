@@ -34,6 +34,7 @@ MAX_MINIMIZE_CHECKS = 100
 POLL_SECONDS = 1.0
 WAKE = threading.Event()
 COOKIE_SECURE = os.environ.get("WAH_COOKIE_SECURE", "1") != "0"
+PAYMENT_QR_PATH = Path(os.environ.get("WAH_PAYMENT_QR", "/etc/wa-hunter/payment/qr.png"))
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_URL = os.environ.get("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
@@ -83,6 +84,9 @@ def init_db():
             "problem_statement": "TEXT NOT NULL DEFAULT ''",
             "oracle_notes": "TEXT NOT NULL DEFAULT ''",
             "oracle_model": "TEXT NOT NULL DEFAULT ''",
+            "payment_requested_at": "INTEGER",
+            "payment_claim": "TEXT NOT NULL DEFAULT ''",
+            "payment_claimed_at": "INTEGER",
         }
         for name, definition in migrations.items():
             if name not in columns:
@@ -129,7 +133,7 @@ def page(title, body, user=None, refresh=None):
 
 
 def response(start, body, status="200 OK", headers=None, content_type="text/html; charset=utf-8"):
-    data = body.encode("utf-8")
+    data = body.encode("utf-8") if isinstance(body, str) else body
     hs = [("Content-Type", content_type), ("Content-Length", str(len(data))),
           ("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"),
           ("Referrer-Policy", "same-origin"),
@@ -516,6 +520,22 @@ Testing cannot prove a program correct.
 """
 
 
+def payment_state(row):
+    if row["paid_at"]:
+        return "已支付，交付已解锁"
+    if row["payment_claim"]:
+        return "已提交付款凭据，等待管理员核对"
+    if row["payment_requested_at"]:
+        return "等待支付 ¥1"
+    if row["status"] == "found":
+        return "反例等待管理员确认"
+    return "尚未进入付款阶段"
+
+
+def can_view_delivery(row, user):
+    return bool(user and (user["is_admin"] or row["paid_at"]))
+
+
 def app(env, start):
     path, method = env.get("PATH_INFO", "/"), env.get("REQUEST_METHOD", "GET")
     user = current_user(env)
@@ -659,8 +679,8 @@ def app(env, start):
         return redirect(start, f"/hunt/{hunt_id}")
     if path == "/hunts" and user:
         with db() as c:
-            rows = c.execute("SELECT id,title,status,created_at,paid_at FROM hunts WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)).fetchall()
-        trs = ''.join(f'<tr><td><a href="/hunt/{r["id"]}">#{r["id"]}</a></td><td>{esc(r["title"])}</td><td>{esc(status_label(r["status"]))}</td><td>{"已确认" if r["paid_at"] else "—"}</td></tr>' for r in rows)
+            rows = c.execute("SELECT id,title,status,created_at,paid_at,payment_requested_at,payment_claim FROM hunts WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)).fetchall()
+        trs = ''.join(f'<tr><td><a href="/hunt/{r["id"]}">#{r["id"]}</a></td><td>{esc(r["title"])}</td><td>{esc(status_label(r["status"]))}</td><td>{esc(payment_state(r))}</td></tr>' for r in rows)
         body = '<div class="card"><h1>我的任务</h1><table><tr><th>#</th><th>标题</th><th>状态</th><th>¥1 交付</th></tr>' + (trs or '<tr><td colspan="4">暂无任务</td></tr>') + '</table></div>'
         return response(start, page("我的任务", body, user))
     match = re.fullmatch(r"/hunt/(\d+)", path)
@@ -670,32 +690,72 @@ def app(env, start):
             return response(start, page("未找到", '<div class="card">任务不存在或无权查看。</div>', user), "404 Not Found")
         cls = "ok" if row["status"] == "found" else ("bad" if row["status"] == "failed" else "warn")
         extra = ''
-        if row["status"] == "found":
+        if row["status"] == "found" and can_view_delivery(row, user):
             extra = f'''<h2>最小化反例</h2><pre>{esc(row['counterexample'])}</pre><table><tr><th>程序</th><th>状态</th><th>输出</th></tr><tr><td>solution</td><td>{esc(row['solution_status'])}</td><td><pre>{esc(row['solution_output'] or '(empty)')}</pre></td></tr><tr><td>brute</td><td>{esc(row['brute_status'])}</td><td><pre>{esc(row['brute_output'] or '(empty)')}</pre></td></tr></table><p><a class="btn" href="/hunt/{row['id']}/counterexample.txt">下载反例</a> <a class="btn secondary" href="/hunt/{row['id']}/report.md">下载报告</a></p>'''
+        elif row["status"] == "found" and row["payment_requested_at"]:
+            claim_form = '' if row["payment_claim"] else f'''<form method="post" action="/hunt/{row['id']}/payment/claim"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>付款交易号后四位（或可核对的付款备注）</label><input name="payment_claim" minlength="4" maxlength="32" required pattern="[A-Za-z0-9_-]{{4,32}}"><button>我已支付 ¥1</button></form>'''
+            extra = f'''<div class="card"><h2>支付 ¥1 解锁反例</h2><p>订单号：<strong>WAH-{row['id']}</strong>。扫码支付后提交交易号后四位，管理员核对到账后会解锁完整反例和报告。</p><img src="/hunt/{row['id']}/payment-qr.png" alt="¥1 收款码" style="display:block;max-width:320px;width:100%;height:auto;border:1px solid var(--line);border-radius:12px">{claim_form}</div>'''
+        elif row["status"] == "found":
+            extra = '<div class="card msg">已经找到反例，管理员正在确认有效性。确认后将进入 ¥1 付款阶段。</div>'
         oracle = ''
-        if row["input_mode"] == "ai" and row["brute_code"]:
+        if row["input_mode"] == "ai" and row["brute_code"] and can_view_delivery(row, user):
             oracle = f'''<h2>AI Oracle（未必正确）</h2><p>{esc(row['oracle_notes'] or '无附加说明')}</p><p class="muted">模型：{esc(row['oracle_model'])}</p><pre>{esc(row['brute_code'])}</pre>'''
-        body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{oracle}{extra}<p>¥1 交付状态：<strong>{"已确认" if row['paid_at'] else "尚未确认"}</strong></p></div>'''
+        body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{oracle}{extra}<p>¥1 交付状态：<strong>{esc(payment_state(row))}</strong></p></div>'''
         return response(start, page(f"Hunt #{row['id']}", body, user, 3 if row["status"] in ("oracle_queued", "oracle_running", "queued", "running") else None))
+    match = re.fullmatch(r"/hunt/(\d+)/payment-qr\.png", path)
+    if match and method == "GET":
+        row = owned_hunt(int(match.group(1)), user)
+        if not row or not row["payment_requested_at"]:
+            return response(start, "not found\n", "404 Not Found", content_type="text/plain; charset=utf-8")
+        try:
+            image = PAYMENT_QR_PATH.read_bytes()
+        except OSError:
+            return response(start, "payment QR is not configured\n", "503 Service Unavailable", content_type="text/plain; charset=utf-8")
+        return response(start, image, headers=[("Cache-Control", "private, no-store")], content_type="image/png")
+    match = re.fullmatch(r"/hunt/(\d+)/payment/claim", path)
+    if match and method == "POST":
+        row = owned_hunt(int(match.group(1)), user)
+        f = form_data(env)
+        if not row or row["user_id"] != user["id"]:
+            return response(start, page("未找到", '<div class="card">任务不存在或无权操作。</div>', user), "404 Not Found")
+        if not csrf_ok(user, f):
+            return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
+        claim = f.get("payment_claim", "").strip()
+        if row["status"] != "found" or not row["payment_requested_at"] or row["paid_at"] or not re.fullmatch(r"[A-Za-z0-9_-]{4,32}", claim):
+            return response(start, page("提交失败", '<div class="card msg">付款状态或凭据格式无效。</div>', user), "409 Conflict")
+        with db() as c:
+            c.execute("UPDATE hunts SET payment_claim=?,payment_claimed_at=?,updated_at=? WHERE id=? AND paid_at IS NULL", (claim, int(time.time()), int(time.time()), row["id"]))
+        return redirect(start, f"/hunt/{row['id']}")
     match = re.fullmatch(r"/hunt/(\d+)/(counterexample\.txt|report\.md)", path)
     if match:
         row = owned_hunt(int(match.group(1)), user)
         if not row:
             return response(start, "not found\n", "404 Not Found", content_type="text/plain; charset=utf-8")
+        if not can_view_delivery(row, user):
+            return response(start, "payment required\n", "402 Payment Required", content_type="text/plain; charset=utf-8")
         if match.group(2) == "counterexample.txt":
             return response(start, row["counterexample"], content_type="text/plain; charset=utf-8", headers=[("Content-Disposition", f'attachment; filename="hunt-{row["id"]}-counterexample.txt"')])
         return response(start, report_for(row), content_type="text/markdown; charset=utf-8", headers=[("Content-Disposition", f'attachment; filename="hunt-{row["id"]}-report.md"')])
     if path == "/admin" and user and user["is_admin"]:
         with db() as c:
-            rows = c.execute("SELECT h.id,h.title,h.status,h.paid_at,u.username FROM hunts h JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT 100").fetchall()
+            rows = c.execute("SELECT h.id,h.title,h.status,h.paid_at,h.payment_requested_at,h.payment_claim,u.username FROM hunts h JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT 100").fetchall()
         table_rows = []
         for row in rows:
             if row["paid_at"]:
-                delivery = "已确认"
-            else:
-                delivery = (f'<form method="post" action="/admin/hunt/{row["id"]}/paid">'
+                delivery = "已支付并解锁"
+            elif row["payment_claim"]:
+                delivery = (f'<p>付款凭据：<strong>{esc(row["payment_claim"])}</strong></p>'
+                            f'<form method="post" action="/admin/hunt/{row["id"]}/paid">'
                             f'<input type="hidden" name="csrf" value="{esc(user["csrf"])}">'
-                            '<button>确认 ¥1</button></form>')
+                            '<button>确认到账并解锁</button></form>')
+            elif row["payment_requested_at"]:
+                delivery = "等待用户支付"
+            elif row["status"] == "found":
+                delivery = (f'<form method="post" action="/admin/hunt/{row["id"]}/request-payment">'
+                            f'<input type="hidden" name="csrf" value="{esc(user["csrf"])}">'
+                            '<button>确认反例并请求 ¥1</button></form>')
+            else:
+                delivery = "—"
             review = ''
             if row["status"] == "oracle_review":
                 review = (f'<form class="inline" method="post" action="/admin/hunt/{row["id"]}/oracle/approve">'
@@ -713,8 +773,20 @@ def app(env, start):
         if not csrf_ok(user, f):
             return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
         with db() as c:
-            c.execute("UPDATE hunts SET paid_at=?,updated_at=? WHERE id=? AND status='found'", (int(time.time()), int(time.time()), int(match.group(1))))
+            changed = c.execute("UPDATE hunts SET paid_at=?,updated_at=? WHERE id=? AND status='found' AND payment_requested_at IS NOT NULL AND payment_claim<>''", (int(time.time()), int(time.time()), int(match.group(1)))).rowcount
+        if not changed:
+            return response(start, page("确认失败", '<div class="card msg">用户尚未提交有效付款凭据。</div>', user), "409 Conflict")
         return redirect(start, "/admin")
+    match = re.fullmatch(r"/admin/hunt/(\d+)/request-payment", path)
+    if match and method == "POST" and user and user["is_admin"]:
+        f = form_data(env)
+        if not csrf_ok(user, f):
+            return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
+        with db() as c:
+            changed = c.execute("UPDATE hunts SET payment_requested_at=?,updated_at=? WHERE id=? AND status='found' AND paid_at IS NULL", (int(time.time()), int(time.time()), int(match.group(1)))).rowcount
+        if not changed:
+            return response(start, page("确认失败", '<div class="card msg">只有已找到且未交付的反例可以请求付款。</div>', user), "409 Conflict")
+        return redirect(start, f"/hunt/{int(match.group(1))}")
     match = re.fullmatch(r"/admin/hunt/(\d+)/oracle/(approve|reject)", path)
     if match and method == "POST" and user and user["is_admin"]:
         f = form_data(env)
