@@ -163,7 +163,7 @@ def minimize(values: list[int], predicate, min_value: int | None = None,
             candidates += [1 if original > 0 else -1]
             x = original
             while abs(x) > 1:
-                x = int(x / 2)
+                x = x // 2 if x >= 0 else -((-x) // 2)
                 candidates.append(x)
         for value in dict.fromkeys(candidates):
             if min_value is not None and value < min_value:

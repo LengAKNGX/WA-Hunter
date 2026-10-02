@@ -35,6 +35,23 @@ class OracleValidationTests(unittest.TestCase):
                 "min_n": 1, "max_n": 2, "min_value": 0, "max_value": 1,
             })
 
+    def test_accepts_signed_int64_limits(self):
+        result = app.validate_oracle({
+            "supported": True,
+            "brute_cpp": "#include <iostream>\nint main(){long long x;std::cin>>x;}",
+            "min_n": 1,
+            "max_n": app.MAX_TEST_N,
+            "min_value": app.INT64_MIN,
+            "max_value": app.INT64_MAX,
+        })
+        self.assertEqual(result["min_value"], -(2**63))
+        self.assertEqual(result["max_value"], 2**63 - 1)
+
+    def test_server_minimize_keeps_int64_precision(self):
+        value = app.INT64_MIN
+        result, _ = app.minimize([value], lambda a: a[0] <= -(2**62), value, app.INT64_MAX)
+        self.assertEqual(result, [-(2**62)])
+
 
 class PaymentAccessTests(unittest.TestCase):
     def test_delivery_is_locked_until_paid(self):

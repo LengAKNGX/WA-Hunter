@@ -24,6 +24,11 @@ class WaHunterTests(unittest.TestCase):
         self.assertEqual(result, [-1])
         self.assertGreater(checks, 0)
 
+    def test_minimize_keeps_int64_precision(self):
+        value = -(2**63)
+        result, _ = minimize([value], lambda a: a[0] <= -(2**62), value, 2**63 - 1)
+        self.assertEqual(result, [-(2**62)])
+
 
 if __name__ == "__main__":
     unittest.main()

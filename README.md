@@ -76,6 +76,8 @@ python wa_hunter.py --solution demo/buggy_solution.cpp --brute examples/brute.cp
 每次运行首先保证覆盖七类数据，之后依据反馈进行加权选择：随机、边界、全部相等、
 单调递增、单调递减、大量重复，以及最小值/最大值/零混合（范围允许零时）。发生
 异常状态或输出差异的策略会获得更高的后续选择权重。固定 `seed` 可复现生成序列。
+在线手动模式支持 `n ≤ 10000`，元素值覆盖完整的有符号 64 位整数范围；用户填写的
+范围仍应遵守目标题目的输入约束。大规模输入可能使暴力 Oracle 超时。
 
 ## 反例最小化 / Counterexample minimization
 
