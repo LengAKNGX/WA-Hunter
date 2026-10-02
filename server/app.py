@@ -594,7 +594,7 @@ def app(env, start):
         return redirect(start, "/", f"wah_session=; Path=/; Max-Age=0; HttpOnly{secure}; SameSite=Lax")
     if path == "/hunt/new" and method == "GET":
         if not user: return redirect(start, "/login")
-        body = f'''<div class="card"><h1>新建 Hunt</h1><p class="msg">只提交你有权运行的代码。不要提交正在进行的比赛、考试、秘密或恶意代码。</p><p><a class="btn" href="/hunt/ai">AI 帮我生成 Oracle</a></p><h2>或手动提供 brute.cpp</h2><form method="post"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>任务标题</label><input name="title" maxlength="120" required placeholder="例如：Harder Horizons 贪心解法"><label>公开题目链接（可选）</label><input name="problem_url" maxlength="500" placeholder="https://..."><label>solution.cpp</label><textarea name="solution_code" maxlength="65536" required></textarea><label>brute.cpp</label><textarea name="brute_code" maxlength="65536" required></textarea><div class="grid"><div><label>测试轮数</label><input type="number" name="iterations" min="1" max="100" value="100"></div><div><label>随机种子</label><input type="number" name="seed" min="0" max="2147483647" value="20261002"></div><div><label>n 范围</label><input name="n_range" value="1,30"></div></div><div class="grid"><div><label>数值最小值</label><input type="number" name="min_value" min="-100000" max="100000" value="1"></div><div><label>数值最大值</label><input type="number" name="max_value" min="-100000" max="100000" value="100000"></div><div></div></div><label><input style="width:auto" type="checkbox" name="consent" value="yes" required> 我有权运行这些代码，并理解未发现差异不代表程序正确。</label><button>加入队列</button></form></div>'''
+        body = f'''<div class="card"><h1>新建 Hunt</h1><p class="msg">只提交你有权运行的代码。不要提交正在进行的比赛、考试、秘密或恶意代码。</p><p><a class="btn" href="/hunt/ai">AI 帮我生成 Oracle</a></p><h2>或手动提供 brute.cpp</h2><p class="muted">brute.cpp 必须是独立的可信实现，不能与 solution.cpp 相同。这里填写的是用于对拍的<strong>小数据范围</strong>，不是原题最大约束。</p><form method="post"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>任务标题</label><input name="title" maxlength="120" required placeholder="例如：Harder Horizons 贪心解法"><label>公开题目链接（可选）</label><input name="problem_url" maxlength="500" placeholder="https://..."><label>solution.cpp</label><textarea name="solution_code" maxlength="65536" required></textarea><label>brute.cpp（必须与候选解独立）</label><textarea name="brute_code" maxlength="65536" required></textarea><div class="grid"><div><label>测试轮数</label><input type="number" name="iterations" min="1" max="100" value="100"></div><div><label>随机种子</label><input type="number" name="seed" min="0" max="2147483647" value="20261002"></div><div><label>小数据 n 范围（最大 40）</label><input name="n_range" value="1,30"></div></div><div class="grid"><div><label>数值最小值</label><input type="number" name="min_value" min="-100000" max="100000" value="1"></div><div><label>数值最大值</label><input type="number" name="max_value" min="-100000" max="100000" value="100000"></div><div></div></div><label><input style="width:auto" type="checkbox" name="consent" value="yes" required> 我有权运行这些代码，并理解未发现差异不代表程序正确。</label><button>加入队列</button></form></div>'''
         return response(start, page("新建任务", body, user))
     if path == "/hunt/ai" and method == "GET":
         if not user: return redirect(start, "/login")
@@ -658,8 +658,12 @@ def app(env, start):
             valid_url = not url or re.fullmatch(r"https?://[^\s]+", url)
             if not title or not solution or not brute or len(solution.encode()) > MAX_CODE or len(brute.encode()) > MAX_CODE:
                 raise ValueError("标题或代码为空/过长")
-            if not (1 <= min_n <= max_n <= 40 and -100000 <= min_value <= max_value <= 100000):
-                raise ValueError("参数超出公开 MVP 范围")
+            if solution.strip() == brute.strip():
+                raise ValueError("solution.cpp 与 brute.cpp 完全相同；请提供独立可信的参考实现，或改用 AI Hunt")
+            if not 1 <= min_n <= max_n <= 40:
+                raise ValueError("小数据 n 范围必须满足 1 ≤ min_n ≤ max_n ≤ 40；不要填写原题的最大 n")
+            if not -100000 <= min_value <= max_value <= 100000:
+                raise ValueError("数值范围必须位于 [-100000, 100000]，且最小值不能大于最大值")
             if not valid_url or f.get("consent") != "yes":
                 raise ValueError("链接或授权确认无效")
         except (ValueError, TypeError) as exc:
