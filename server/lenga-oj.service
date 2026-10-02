@@ -9,6 +9,7 @@ Group=lenga-oj
 WorkingDirectory=/opt/lenga-oj
 Environment=PYTHONUNBUFFERED=1
 Environment=WAH_JOB_ROOT=/opt/lenga-oj-jobs
+EnvironmentFile=/etc/wa-hunter/deepseek.env
 ExecStart=/usr/bin/python3 /opt/lenga-oj/app.py
 Restart=on-failure
 RestartSec=3

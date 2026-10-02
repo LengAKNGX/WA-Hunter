@@ -3,9 +3,10 @@
 > 用差分测试自动寻找并缩小 C++ 数组算法的反例。  
 > Find and minimize counterexamples for C++ array algorithms with differential testing.
 
-WA Hunter 是一个零付费 API、零 LLM 依赖的课程项目 MVP。用户提供候选程序
-`solution.cpp`、可信的小数据程序 `brute.cpp` 和配置文件，Agent 会自动编译、生成
-测试、执行对拍，并在发现输出不一致后缩小反例。
+WA Hunter 的核心 CLI 是一个零付费 API、零 LLM 依赖的课程项目 MVP。用户提供候选
+程序 `solution.cpp`、可信的小数据程序 `brute.cpp` 和配置文件，Agent 会自动编译、
+生成测试、执行对拍，并在发现输出不一致后缩小反例。在线服务另提供可选的
+DeepSeek 辅助模式：根据题面生成独立 Oracle，编译后必须经过管理员审核才能对拍。
 
 WA Hunter is a dependency-free course-project MVP. Given a candidate
 `solution.cpp`, a trusted `brute.cpp`, and a JSON configuration, it compiles
@@ -104,9 +105,10 @@ Issue、附件和评论默认公开。不要上传私有作业、比赛中仍保
 
 ## 在线服务 / Hosted service
 
-`lenga.com.cn` 已部署受控版本：注册用户可以提交两份 C++17 源码，任务通过
-单并发后台队列进入 Firejail，在私有结果页查看反例和报告。生产迁移、安全边界与
-回滚方案见 [docs/SERVER_DEPLOYMENT.md](docs/SERVER_DEPLOYMENT.md)，服务端源码见
+`lenga.com.cn` 已部署受控版本：注册用户既可以提交两份 C++17 源码，也可以提交
+题面与候选解，由 DeepSeek Flash 生成待审核 Oracle。任务通过单并发后台队列进入
+Firejail，在私有结果页查看反例和报告。候选解不会发送给模型。生产迁移、安全边界
+与回滚方案见 [docs/SERVER_DEPLOYMENT.md](docs/SERVER_DEPLOYMENT.md)，服务端源码见
 [server/](server/)。
 
 ## 开发与许可 / Development and license
@@ -114,6 +116,7 @@ Issue、附件和评论默认公开。不要上传私有作业、比赛中仍保
 ```powershell
 python -m unittest discover -s tests -v
 python -m py_compile wa_hunter.py
+python -m py_compile server/app.py
 ```
 
 项目采用 [MIT License](LICENSE)。欢迎提交 Bug、测试策略和新的输入模型。

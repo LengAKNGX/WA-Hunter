@@ -11,6 +11,7 @@ It intentionally uses only the Python standard library. The service provides:
 - multi-strategy generation and bounded counterexample minimization;
 - downloadable reports and counterexamples;
 - administrator-only ¥1 delivery confirmation.
+- optional DeepSeek-assisted Oracle generation with mandatory administrator review.
 
 ## Production requirements
 
@@ -19,6 +20,11 @@ It intentionally uses only the Python standard library. The service provides:
 - writable `/opt/lenga-oj/data` and `/opt/lenga-oj-jobs` directories;
 - the systemd restrictions in `lenga-oj.service`;
 - HTTPS at the reverse proxy. Secure session cookies are enabled by default.
+- a root-owned `/etc/wa-hunter/deepseek.env` (`0600`) loaded by systemd when AI Hunt is enabled.
+
+The AI path never treats generated code as ground truth automatically. It compiles the generated
+Oracle inside the existing sandbox, pauses the task for administrator review, and only then allows
+the deterministic differential-testing worker to run.
 
 Do not run this as root and do not remove the Firejail, network, resource, or
 filesystem restrictions. See `../SECURITY.md` and
