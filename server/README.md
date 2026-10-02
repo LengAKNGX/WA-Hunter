@@ -22,8 +22,9 @@ It intentionally uses only the Python standard library. The service provides:
 - the systemd restrictions in `lenga-oj.service`;
 - HTTPS at the reverse proxy. Secure session cookies are enabled by default.
 - a root-owned `/etc/wa-hunter/deepseek.env` (`0600`) loaded by systemd when AI Hunt is enabled.
-- a private payment QR at `/etc/wa-hunter/payment/qr.png`, owned by `root:lenga-oj`
-  with mode `0640`; it is served only through an authenticated, owned hunt route.
+- private WeChat and Alipay payment QRs under `/etc/wa-hunter/payment/`, owned by
+  `root:lenga-oj` with mode `0640`; they are served only through authenticated,
+  owned hunt routes and are never committed to the repository.
 
 The AI path never treats generated code as ground truth automatically. It compiles the generated
 Oracle inside the existing sandbox, pauses the task for administrator review, and only then allows

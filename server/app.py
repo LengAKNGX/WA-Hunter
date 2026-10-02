@@ -34,7 +34,10 @@ MAX_MINIMIZE_CHECKS = 100
 POLL_SECONDS = 1.0
 WAKE = threading.Event()
 COOKIE_SECURE = os.environ.get("WAH_COOKIE_SECURE", "1") != "0"
-PAYMENT_QR_PATH = Path(os.environ.get("WAH_PAYMENT_QR", "/etc/wa-hunter/payment/qr.png"))
+PAYMENT_QR_PATHS = {
+    "wechat": Path(os.environ.get("WAH_PAYMENT_QR_WECHAT", "/etc/wa-hunter/payment/wechat.png")),
+    "alipay": Path(os.environ.get("WAH_PAYMENT_QR_ALIPAY", "/etc/wa-hunter/payment/alipay.jpg")),
+}
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-flash")
 DEEPSEEK_URL = os.environ.get("DEEPSEEK_URL", "https://api.deepseek.com/chat/completions")
@@ -694,7 +697,7 @@ def app(env, start):
             extra = f'''<h2>最小化反例</h2><pre>{esc(row['counterexample'])}</pre><table><tr><th>程序</th><th>状态</th><th>输出</th></tr><tr><td>solution</td><td>{esc(row['solution_status'])}</td><td><pre>{esc(row['solution_output'] or '(empty)')}</pre></td></tr><tr><td>brute</td><td>{esc(row['brute_status'])}</td><td><pre>{esc(row['brute_output'] or '(empty)')}</pre></td></tr></table><p><a class="btn" href="/hunt/{row['id']}/counterexample.txt">下载反例</a> <a class="btn secondary" href="/hunt/{row['id']}/report.md">下载报告</a></p>'''
         elif row["status"] == "found" and row["payment_requested_at"]:
             claim_form = '' if row["payment_claim"] else f'''<form method="post" action="/hunt/{row['id']}/payment/claim"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>付款交易号后四位（或可核对的付款备注）</label><input name="payment_claim" minlength="4" maxlength="32" required pattern="[A-Za-z0-9_-]{{4,32}}"><button>我已支付 ¥1</button></form>'''
-            extra = f'''<div class="card"><h2>支付 ¥1 解锁反例</h2><p>订单号：<strong>WAH-{row['id']}</strong>。扫码支付后提交交易号后四位，管理员核对到账后会解锁完整反例和报告。</p><img src="/hunt/{row['id']}/payment-qr.png" alt="¥1 收款码" style="display:block;max-width:320px;width:100%;height:auto;border:1px solid var(--line);border-radius:12px">{claim_form}</div>'''
+            extra = f'''<div class="card"><h2>支付 ¥1 解锁反例</h2><p>订单号：<strong>WAH-{row['id']}</strong>。任选微信或支付宝扫码支付，随后提交交易号后四位，管理员核对到账后会解锁完整反例和报告。</p><div style="display:flex;flex-wrap:wrap;gap:18px"><div><h3>微信支付</h3><img src="/hunt/{row['id']}/payment-qr/wechat" alt="微信 ¥1 收款码" style="display:block;max-width:300px;width:100%;height:auto;border:1px solid var(--line);border-radius:12px"></div><div><h3>支付宝</h3><img src="/hunt/{row['id']}/payment-qr/alipay" alt="支付宝 ¥1 收款码" style="display:block;max-width:300px;width:100%;height:auto;border:1px solid var(--line);border-radius:12px"></div></div>{claim_form}</div>'''
         elif row["status"] == "found":
             extra = '<div class="card msg">已经找到反例，管理员正在确认有效性。确认后将进入 ¥1 付款阶段。</div>'
         oracle = ''
@@ -702,16 +705,18 @@ def app(env, start):
             oracle = f'''<h2>AI Oracle（未必正确）</h2><p>{esc(row['oracle_notes'] or '无附加说明')}</p><p class="muted">模型：{esc(row['oracle_model'])}</p><pre>{esc(row['brute_code'])}</pre>'''
         body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{oracle}{extra}<p>¥1 交付状态：<strong>{esc(payment_state(row))}</strong></p></div>'''
         return response(start, page(f"Hunt #{row['id']}", body, user, 3 if row["status"] in ("oracle_queued", "oracle_running", "queued", "running") else None))
-    match = re.fullmatch(r"/hunt/(\d+)/payment-qr\.png", path)
+    match = re.fullmatch(r"/hunt/(\d+)/payment-qr/(wechat|alipay)", path)
     if match and method == "GET":
         row = owned_hunt(int(match.group(1)), user)
         if not row or not row["payment_requested_at"]:
             return response(start, "not found\n", "404 Not Found", content_type="text/plain; charset=utf-8")
+        provider = match.group(2)
         try:
-            image = PAYMENT_QR_PATH.read_bytes()
+            image = PAYMENT_QR_PATHS[provider].read_bytes()
         except OSError:
             return response(start, "payment QR is not configured\n", "503 Service Unavailable", content_type="text/plain; charset=utf-8")
-        return response(start, image, headers=[("Cache-Control", "private, no-store")], content_type="image/png")
+        content_type = "image/png" if provider == "wechat" else "image/jpeg"
+        return response(start, image, headers=[("Cache-Control", "private, no-store")], content_type=content_type)
     match = re.fullmatch(r"/hunt/(\d+)/payment/claim", path)
     if match and method == "POST":
         row = owned_hunt(int(match.group(1)), user)
