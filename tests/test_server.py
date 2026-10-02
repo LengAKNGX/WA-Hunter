@@ -57,6 +57,27 @@ class OracleValidationTests(unittest.TestCase):
         self.assertEqual(app.bounded_iterations(100, 100000), 10)
         self.assertEqual(app.bounded_iterations(100, 10000), 100)
 
+    def test_rejects_ai_range_expansion(self):
+        data = {
+            "supported": True,
+            "brute_cpp": "#include <iostream>\nint main(){return 0;}",
+            "min_n": 1, "max_n": 12,
+            "min_value": 1, "max_value": 2000000,
+        }
+        allowed = {"min_n": 1, "max_n": 10000, "min_value": 1, "max_value": 20000}
+        with self.assertRaisesRegex(RuntimeError, "擅自扩大"):
+            app.validate_oracle(data, allowed)
+
+    def test_accepts_ai_range_subset(self):
+        data = {
+            "supported": True,
+            "brute_cpp": "#include <iostream>\nint main(){return 0;}",
+            "min_n": 1, "max_n": 12,
+            "min_value": 1, "max_value": 20000,
+        }
+        allowed = {"min_n": 1, "max_n": 10000, "min_value": 1, "max_value": 20000}
+        self.assertEqual(app.validate_oracle(data, allowed)["max_value"], 20000)
+
 
 class PaymentAccessTests(unittest.TestCase):
     def test_delivery_is_locked_until_paid(self):
