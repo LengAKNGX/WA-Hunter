@@ -1,0 +1,25 @@
+[Unit]
+Description=WA Hunter differential testing service
+After=network.target
+
+[Service]
+Type=simple
+User=lenga-oj
+Group=lenga-oj
+WorkingDirectory=/opt/lenga-oj
+Environment=PYTHONUNBUFFERED=1
+Environment=WAH_JOB_ROOT=/opt/lenga-oj-jobs
+ExecStart=/usr/bin/python3 /opt/lenga-oj/app.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/lenga-oj/data /opt/lenga-oj-jobs /var/lib/lenga-oj-home /run/firejail
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

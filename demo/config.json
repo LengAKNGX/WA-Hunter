@@ -1,0 +1,13 @@
+{
+  "iterations": 100,
+  "seed": 20261002,
+  "timeout_seconds": 1.0,
+  "min_n": 1,
+  "max_n": 20,
+  "min_value": 1,
+  "max_value": 20,
+  "compiler": "g++",
+  "compile_flags": ["-std=c++17", "-O2", "-Wall", "-Wextra"],
+  "counterexample": "demo/counterexample.txt",
+  "report": "demo/report.md"
+}

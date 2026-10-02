@@ -1,0 +1,9 @@
+.wa_hunter_build/
+__pycache__/
+*.pyc
+counterexample.txt
+report.md
+server/data/
+*.db
+*.db-shm
+*.db-wal

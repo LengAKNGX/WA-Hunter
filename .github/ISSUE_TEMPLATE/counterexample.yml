@@ -1,0 +1,62 @@
+name: Request a counterexample
+description: Ask WA Hunter to test a public C++ array solution (¥1 only if a valid counterexample is found)
+title: "[Hunt] "
+labels:
+  - counterexample-request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for trying WA Hunter. Issues and attachments are public. Do not submit private coursework, secrets, personal data, or code you do not have permission to share.
+  - type: input
+    id: problem
+    attributes:
+      label: Public problem URL
+      description: Link to the public statement. If there is no URL, provide the statement below.
+      placeholder: https://codeforces.com/contest/.../problem/...
+  - type: textarea
+    id: statement
+    attributes:
+      label: Problem summary and constraints
+      description: Explain the required output and list n/value limits.
+      placeholder: First line n; second line n integers; print ...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Candidate solution.cpp
+      description: Paste C++17 source that you are allowed to publish.
+      render: cpp
+    validations:
+      required: true
+  - type: textarea
+    id: brute
+    attributes:
+      label: Trusted brute.cpp
+      description: Paste a small-input C++17 oracle that you are allowed to publish.
+      render: cpp
+    validations:
+      required: true
+  - type: dropdown
+    id: format
+    attributes:
+      label: Input format
+      options:
+        - First line n; second line n integers
+        - Other (not supported by the current MVP)
+    validations:
+      required: true
+  - type: checkboxes
+    id: consent
+    attributes:
+      label: Consent and scope
+      options:
+        - label: I have permission to publish and test this code.
+          required: true
+        - label: This is not an active contest, exam, or prohibited assignment.
+          required: true
+        - label: I understand that finding a confirmed counterexample costs ¥1 CNY; no find means no charge.
+          required: true
+        - label: I understand that testing cannot prove the program correct.
+          required: true

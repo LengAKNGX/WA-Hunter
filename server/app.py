@@ -1,0 +1,557 @@
+#!/usr/bin/env python3
+import base64
+import hashlib
+import hmac
+import html
+import json
+import os
+import random
+import re
+import secrets
+import sqlite3
+import subprocess
+import tempfile
+import threading
+import time
+from http import cookies
+from pathlib import Path
+from socketserver import ThreadingMixIn
+from urllib.parse import parse_qs
+from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
+BASE = Path(__file__).resolve().parent
+DB_PATH = Path(os.environ.get("WAH_DB", BASE / "data" / "oj.db"))
+JOB_ROOT = Path(os.environ.get("WAH_JOB_ROOT", "/opt/lenga-oj-jobs"))
+MAX_CODE = 65536
+MAX_QUEUE = 5
+MAX_ITERATIONS = 100
+MAX_MINIMIZE_CHECKS = 100
+POLL_SECONDS = 1.0
+WAKE = threading.Event()
+COOKIE_SECURE = os.environ.get("WAH_COOKIE_SECURE", "1") != "0"
+
+
+def db():
+    conn = sqlite3.connect(DB_PATH, timeout=20)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with db() as c:
+        c.executescript("""
+        CREATE TABLE IF NOT EXISTS users(
+          id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL,
+          password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS sessions(
+          token_hash TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          csrf TEXT NOT NULL, expires_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hunts(
+          id INTEGER PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES users(id),
+          title TEXT NOT NULL, problem_url TEXT NOT NULL DEFAULT '',
+          solution_code TEXT NOT NULL, brute_code TEXT NOT NULL,
+          iterations INTEGER NOT NULL, seed INTEGER NOT NULL,
+          min_n INTEGER NOT NULL, max_n INTEGER NOT NULL,
+          min_value INTEGER NOT NULL, max_value INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          strategy TEXT NOT NULL DEFAULT '', found_iteration INTEGER NOT NULL DEFAULT 0,
+          original_case TEXT NOT NULL DEFAULT '', counterexample TEXT NOT NULL DEFAULT '',
+          solution_status TEXT NOT NULL DEFAULT '', brute_status TEXT NOT NULL DEFAULT '',
+          solution_output TEXT NOT NULL DEFAULT '', brute_output TEXT NOT NULL DEFAULT '',
+          detail TEXT NOT NULL DEFAULT '', minimize_checks INTEGER NOT NULL DEFAULT 0,
+          paid_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_hunts_user ON hunts(user_id,id DESC);
+        CREATE INDEX IF NOT EXISTS idx_hunts_status ON hunts(status,id);
+        """)
+        c.execute("UPDATE hunts SET status='queued',detail='服务重启后重新排队',updated_at=? WHERE status='running'", (int(time.time()),))
+
+
+def password_hash(password):
+    salt = secrets.token_bytes(16)
+    out = hashlib.scrypt(password.encode(), salt=salt, n=2**15, r=8, p=1,
+                         dklen=32, maxmem=64 * 1024 * 1024)
+    return "scrypt$32768$" + base64.urlsafe_b64encode(salt).decode() + "$" + base64.urlsafe_b64encode(out).decode()
+
+
+def password_ok(password, stored):
+    try:
+        _, n, salt, expected = stored.split("$", 3)
+        out = hashlib.scrypt(password.encode(), salt=base64.urlsafe_b64decode(salt),
+                             n=int(n), r=8, p=1, dklen=32,
+                             maxmem=64 * 1024 * 1024)
+        return hmac.compare_digest(base64.urlsafe_b64encode(out).decode(), expected)
+    except Exception:
+        return False
+
+
+def esc(value):
+    return html.escape(str(value or ""), quote=True)
+
+
+def page(title, body, user=None, refresh=None):
+    nav = '<a href="/">首页</a>'
+    if user:
+        nav += ' <a href="/hunt/new">新建任务</a> <a href="/hunts">我的任务</a>'
+        if user["is_admin"]:
+            nav += ' <a href="/admin">管理</a>'
+        nav += f' <span class="who">{esc(user["username"])}</span> <form class="inline" method="post" action="/logout"><input type="hidden" name="csrf" value="{esc(user["csrf"])}"><button class="navbtn">退出</button></form>'
+    else:
+        nav += ' <a href="/login">登录</a> <a href="/register">注册</a>'
+    refresh_tag = f'<meta http-equiv="refresh" content="{int(refresh)}">' if refresh else ''
+    return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh_tag}<title>{esc(title)} · WA Hunter</title><style>
+*{{box-sizing:border-box}}:root{{--ink:#162033;--muted:#64748b;--line:#dbe3ee;--blue:#2563eb;--nav:#0f172a;--bg:#f4f7fb;--good:#15803d;--bad:#b91c1c;--warn:#a16207}}body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.65 system-ui,-apple-system,"Segoe UI",sans-serif}}header{{background:var(--nav);color:#fff}}.wrap{{max-width:1050px;margin:auto;padding:18px}}header .wrap{{display:flex;align-items:center;justify-content:space-between;gap:18px}}header strong{{font-size:20px}}header a{{color:#fff;text-decoration:none;margin-right:16px}}main{{min-height:calc(100vh - 150px)}}.hero{{padding:46px 28px;background:linear-gradient(135deg,#0f172a,#1e3a8a);color:#fff;border-radius:18px;margin:22px 0}}.hero h1{{font-size:42px;margin:.1em 0}}.hero p{{font-size:18px;max-width:760px;color:#dbeafe}}.grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}}.card{{background:#fff;border:1px solid var(--line);border-radius:12px;padding:22px;margin:16px 0;box-shadow:0 2px 8px #0f172a0a}}h1,h2,h3{{line-height:1.25}}a{{color:var(--blue)}}label{{display:block;font-weight:650;margin-top:13px}}input,textarea,select{{width:100%;padding:10px;border:1px solid #b8c4d5;border-radius:7px;font:inherit}}textarea{{min-height:170px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}}button,.btn{{display:inline-block;background:var(--blue);color:#fff;border:0;border-radius:7px;padding:10px 17px;margin-top:14px;text-decoration:none;cursor:pointer}}.secondary{{background:#334155}}.inline{{display:inline}}.navbtn{{background:none;padding:0;margin:0;color:#fff}}.who{{color:#bfdbfe;margin-right:12px}}table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}}pre{{white-space:pre-wrap;background:#eef2f7;padding:13px;border-radius:7px;overflow:auto}}.muted{{color:var(--muted)}}.ok{{color:var(--good)}}.bad{{color:var(--bad)}}.warn{{color:var(--warn)}}.msg{{padding:12px;background:#fff7ed;border:1px solid #fed7aa;border-radius:7px}}.pill{{display:inline-block;padding:2px 9px;border-radius:999px;background:#e2e8f0;font-size:13px}}footer{{text-align:center;color:var(--muted);padding:22px}}footer a{{color:inherit}}@media(max-width:720px){{.grid{{grid-template-columns:1fr}}header .wrap{{display:block}}.hero h1{{font-size:32px}}.wrap{{padding:12px}}table{{font-size:13px}}}}
+</style></head><body><header><div class="wrap"><strong>WA Hunter</strong><nav>{nav}</nav></div></header><main class="wrap">{body}</main><footer>Agentic differential testing · <a href="https://beian.miit.gov.cn/" target="_blank" rel="noopener">苏ICP备2026068871号</a></footer></body></html>'''
+
+
+def response(start, body, status="200 OK", headers=None, content_type="text/html; charset=utf-8"):
+    data = body.encode("utf-8")
+    hs = [("Content-Type", content_type), ("Content-Length", str(len(data))),
+          ("X-Content-Type-Options", "nosniff"), ("X-Frame-Options", "DENY"),
+          ("Referrer-Policy", "same-origin"),
+          ("Content-Security-Policy", "default-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")]
+    hs.extend(headers or [])
+    start(status, hs)
+    return [data]
+
+
+def redirect(start, url, cookie=None):
+    hs = [("Location", url)]
+    if cookie:
+        hs.append(("Set-Cookie", cookie))
+    start("303 See Other", hs)
+    return [b""]
+
+
+def form_data(env):
+    try:
+        length = min(int(env.get("CONTENT_LENGTH") or 0), 180000)
+    except ValueError:
+        length = 0
+    raw = env["wsgi.input"].read(length).decode("utf-8", "replace")
+    return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
+
+def current_user(env):
+    jar = cookies.SimpleCookie(env.get("HTTP_COOKIE", ""))
+    if "wah_session" not in jar:
+        return None
+    token_hash = hashlib.sha256(jar["wah_session"].value.encode()).hexdigest()
+    with db() as c:
+        return c.execute("SELECT u.*,s.csrf FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?", (token_hash, int(time.time()))).fetchone()
+
+
+def csrf_ok(user, form):
+    return bool(user and hmac.compare_digest(user["csrf"], form.get("csrf", "")))
+
+
+def case_text(values):
+    return f"{len(values)}\n{' '.join(map(str, values))}\n"
+
+
+class Generator:
+    strategies = ["random", "boundary", "all_equal", "increasing", "decreasing", "many_duplicates", "extreme_mix"]
+
+    def __init__(self, row):
+        self.lo, self.hi = row["min_value"], row["max_value"]
+        self.min_n, self.max_n = row["min_n"], row["max_n"]
+        self.rng = random.Random(row["seed"])
+        self.cursor = 0
+        self.weights = {name: 1 for name in self.strategies}
+
+    def next(self):
+        if self.cursor < len(self.strategies):
+            name = self.strategies[self.cursor]
+            self.cursor += 1
+        else:
+            name = self.rng.choices(self.strategies, weights=[self.weights[x] for x in self.strategies], k=1)[0]
+        n = self.rng.randint(self.min_n, self.max_n)
+        lo, hi = self.lo, self.hi
+        if name == "random":
+            values = [self.rng.randint(lo, hi) for _ in range(n)]
+        elif name == "boundary":
+            pool = [lo, hi]
+            values = [pool[i % 2] for i in range(n)]
+        elif name == "all_equal":
+            pool = [lo, hi] + ([0] if lo <= 0 <= hi else [])
+            values = [self.rng.choice(pool)] * n
+        elif name == "increasing":
+            values = sorted(self.rng.randint(lo, hi) for _ in range(n))
+        elif name == "decreasing":
+            values = sorted((self.rng.randint(lo, hi) for _ in range(n)), reverse=True)
+        elif name == "many_duplicates":
+            pool = [self.rng.randint(lo, hi) for _ in range(min(3, n))]
+            values = [self.rng.choice(pool) for _ in range(n)]
+        else:
+            pool = [lo, hi] + ([0] if lo <= 0 <= hi else [])
+            values = [pool[i % len(pool)] for i in range(n)]
+        return name, values
+
+    def feedback(self, strategy, interesting):
+        if interesting:
+            self.weights[strategy] = min(8, self.weights[strategy] + 3)
+
+
+def sandbox_cmd(work, inner, memory_mb, cpu_seconds):
+    limited = ["/usr/bin/env", f"--chdir={work}", "/usr/bin/prlimit",
+               f"--as={memory_mb * 1024 * 1024}", f"--cpu={cpu_seconds}",
+               "--nproc=32", "--fsize=2097152", "--nofile=64", "--"] + inner
+    return ["/usr/bin/firejail", "--noprofile", "--quiet", "--net=none", "--tab",
+            "--private", f"--read-write={work}", "--private-dev", "--private-tmp",
+            "--noroot", "--caps.drop=all", "--seccomp", "--nonewprivs",
+            "--blacklist=/opt/lenga-oj/data", "--blacklist=/root",
+            "--blacklist=/etc/ssh", "--rlimit-fsize=2097152", "--rlimit-nofile=64"] + limited
+
+
+def limited_process(command, timeout, input_bytes=None):
+    started = time.monotonic()
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            cp = subprocess.run(command, input=input_bytes, stdout=out, stderr=err, timeout=timeout)
+            status = "ok" if cp.returncode == 0 else f"runtime_error({cp.returncode})"
+        except subprocess.TimeoutExpired:
+            status = "timeout"
+        out.seek(0); stdout = out.read(1048577)
+        err.seek(0); stderr = err.read(16385)
+    if len(stdout) > 1048576:
+        status = "output_limit"
+        stdout = stdout[:1048576]
+    return {"status": status, "output": stdout.decode("utf-8", "replace").strip(),
+            "stderr": stderr.decode("utf-8", "replace").strip(),
+            "elapsed_ms": int((time.monotonic() - started) * 1000)}
+
+
+def compile_pair(work):
+    for name in ("solution", "brute"):
+        result = limited_process(sandbox_cmd(work, ["g++", f"{name}.cpp", "-O2", "-std=c++17", "-pipe", "-o", name], 512, 10), 12)
+        if result["status"] != "ok":
+            message = result["stderr"] or result["output"] or result["status"]
+            raise RuntimeError(f"{name}.cpp 编译失败：\n{message[:4000]}")
+
+
+def run_one(work, name, values):
+    return limited_process(sandbox_cmd(work, [f"./{name}"], 256, 1), 1.2, case_text(values).encode())
+
+
+def differs(a, b):
+    return a["status"] != b["status"] or a["output"].split() != b["output"].split()
+
+
+def minimize(values, predicate, lo, hi):
+    current, checks, granularity = values[:], 0, 2
+    while len(current) >= 2 and checks < MAX_MINIMIZE_CHECKS:
+        chunk = max(1, (len(current) + granularity - 1) // granularity)
+        reduced = False
+        for start in range(0, len(current), chunk):
+            candidate = current[:start] + current[start + chunk:]
+            if not candidate:
+                continue
+            checks += 1
+            if predicate(candidate):
+                current, reduced = candidate, True
+                granularity = max(2, granularity - 1)
+                break
+            if checks >= MAX_MINIMIZE_CHECKS:
+                break
+        if not reduced:
+            if granularity >= len(current):
+                break
+            granularity = min(len(current), granularity * 2)
+    for i in range(len(current)):
+        if checks >= MAX_MINIMIZE_CHECKS:
+            break
+        original = current[i]
+        candidates = [0, 1 if original > 0 else -1]
+        x = original
+        while abs(x) > 1:
+            x = int(x / 2)
+            candidates.append(x)
+        for value in dict.fromkeys(candidates):
+            if value == current[i] or not lo <= value <= hi:
+                continue
+            candidate = current[:]
+            candidate[i] = value
+            checks += 1
+            if predicate(candidate):
+                current = candidate
+                break
+            if checks >= MAX_MINIMIZE_CHECKS:
+                break
+    return current, checks
+
+
+def process_hunt(hunt_id):
+    with db() as c:
+        row = c.execute("SELECT * FROM hunts WHERE id=?", (hunt_id,)).fetchone()
+    if not row:
+        return
+    now = int(time.time())
+    with tempfile.TemporaryDirectory(prefix=f"hunt-{hunt_id}-", dir=JOB_ROOT) as work:
+        Path(work, "solution.cpp").write_text(row["solution_code"], encoding="utf-8")
+        Path(work, "brute.cpp").write_text(row["brute_code"], encoding="utf-8")
+        compile_pair(work)
+        generator = Generator(row)
+        for iteration in range(1, row["iterations"] + 1):
+            strategy, values = generator.next()
+            sol, brute = run_one(work, "solution", values), run_one(work, "brute", values)
+            failed = differs(sol, brute)
+            generator.feedback(strategy, failed)
+            if not failed:
+                continue
+
+            def predicate(candidate):
+                return differs(run_one(work, "solution", candidate), run_one(work, "brute", candidate))
+
+            minimized, checks = minimize(values, predicate, row["min_value"], row["max_value"])
+            sol, brute = run_one(work, "solution", minimized), run_one(work, "brute", minimized)
+            with db() as c:
+                c.execute("""UPDATE hunts SET status='found',strategy=?,found_iteration=?,
+                    original_case=?,counterexample=?,solution_status=?,brute_status=?,
+                    solution_output=?,brute_output=?,detail=?,minimize_checks=?,updated_at=? WHERE id=?""",
+                    (strategy, iteration, case_text(values), case_text(minimized), sol["status"],
+                     brute["status"], sol["output"][:4000], brute["output"][:4000],
+                     f"从 {len(values)} 个元素缩减到 {len(minimized)} 个元素", checks, now, hunt_id))
+            return
+    with db() as c:
+        c.execute("UPDATE hunts SET status='not_found',detail=?,updated_at=? WHERE id=?",
+                  (f"在 {row['iterations']} 轮测试中未发现差异；这不代表程序一定正确。", int(time.time()), hunt_id))
+
+
+def worker_loop():
+    while True:
+        hunt_id = None
+        try:
+            with db() as c:
+                c.execute("BEGIN IMMEDIATE")
+                row = c.execute("SELECT id FROM hunts WHERE status='queued' ORDER BY id LIMIT 1").fetchone()
+                if row:
+                    hunt_id = row["id"]
+                    c.execute("UPDATE hunts SET status='running',detail='正在编译并搜索反例',updated_at=? WHERE id=?", (int(time.time()), hunt_id))
+            if hunt_id:
+                try:
+                    process_hunt(hunt_id)
+                except Exception as exc:
+                    with db() as c:
+                        c.execute("UPDATE hunts SET status='failed',detail=?,updated_at=? WHERE id=?", (str(exc)[:4000], int(time.time()), hunt_id))
+                continue
+        except Exception:
+            time.sleep(1)
+        WAKE.wait(POLL_SECONDS)
+        WAKE.clear()
+
+
+def status_label(status):
+    labels = {"queued": "排队中", "running": "搜索中", "found": "已找到反例",
+              "not_found": "未找到", "failed": "执行失败"}
+    return labels.get(status, status)
+
+
+def owned_hunt(hunt_id, user):
+    if not user:
+        return None
+    with db() as c:
+        return c.execute("SELECT h.*,u.username FROM hunts h JOIN users u ON u.id=h.user_id WHERE h.id=? AND (h.user_id=? OR ?=1)", (hunt_id, user["id"], user["is_admin"])).fetchone()
+
+
+def report_for(row):
+    if row["status"] != "found":
+        return f"# WA Hunter Report\n\nStatus: {status_label(row['status'])}\n\n{row['detail']}\n"
+    return f"""# WA Hunter Report
+
+## Result
+
+Counterexample found on iteration **{row['found_iteration']}** using strategy **{row['strategy']}**.
+
+## Minimized counterexample
+
+```text
+{row['counterexample'].rstrip()}
+```
+
+## Program behavior
+
+| Program | Status | Output |
+|---|---|---|
+| solution | {row['solution_status']} | `{row['solution_output'] or '(empty)'}` |
+| brute | {row['brute_status']} | `{row['brute_output'] or '(empty)'}` |
+
+## Minimization
+
+- {row['detail']}
+- Checks: {row['minimize_checks']}
+- Seed: {row['seed']}
+
+Testing cannot prove a program correct.
+"""
+
+
+def app(env, start):
+    path, method = env.get("PATH_INFO", "/"), env.get("REQUEST_METHOD", "GET")
+    user = current_user(env)
+    if path == "/health":
+        with db() as c:
+            queued = c.execute("SELECT count(*) FROM hunts WHERE status IN ('queued','running')").fetchone()[0]
+        return response(start, f"ok queue={queued}\n", content_type="text/plain; charset=utf-8")
+    if path == "/":
+        with db() as c:
+            stats = c.execute("SELECT count(*) total,sum(status='found') found FROM hunts").fetchone()
+        action = '<a class="btn" href="/hunt/new">开始一次 Hunt</a>' if user else '<a class="btn" href="/register">免费注册</a> <a class="btn secondary" href="/login">登录</a>'
+        body = f'''<section class="hero"><span class="pill">Project ¥1 · Public Beta</span><h1>自动找到让程序出错的反例</h1><p>提交 C++ 候选解和可信的暴力解。WA Hunter 会生成多类数组数据、自动对拍，并用 Delta Debugging 把错误缩小成容易理解的输入。</p>{action}</section>
+        <div class="grid"><div class="card"><h2>多策略生成</h2><p>随机、边界、单调、重复、全相等与极值混合。</p></div><div class="card"><h2>Agent 循环</h2><p>选择策略 → 执行工具 → 观察输出 → 调整策略。</p></div><div class="card"><h2>自动最小化</h2><p>删除元素并收缩数值，每一步都重新验证。</p></div></div>
+        <div class="card"><h2>¥1 反例服务</h2><p>找到并人工确认有效反例后收费 <strong>¥1 CNY</strong>；找不到不收费。当前仅支持第一行 <code>n</code>、第二行 <code>n</code> 个整数的 C++17 数组题。</p><p class="muted">已创建 {stats['total'] or 0} 个任务，找到 {stats['found'] or 0} 个反例。测试未发现问题不等于证明程序正确。</p></div>'''
+        return response(start, page("首页", body, user))
+    if path in ("/login", "/register") and method == "GET":
+        name = "登录" if path == "/login" else "注册"
+        auto = "current-password" if path == "/login" else "new-password"
+        body = f'<div class="card"><h1>{name}</h1><form method="post"><label>用户名（3–24 位字母、数字或下划线）</label><input name="username" maxlength="24" required autocomplete="username"><label>密码（至少 10 位）</label><input type="password" name="password" minlength="10" required autocomplete="{auto}"><button>{name}</button></form></div>'
+        return response(start, page(name, body, user))
+    if path == "/register" and method == "POST":
+        f = form_data(env); name = f.get("username", "").strip(); pw = f.get("password", "")
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,24}", name) or len(pw) < 10:
+            return response(start, page("注册失败", '<div class="card msg">用户名或密码不符合要求。</div>'), "400 Bad Request")
+        try:
+            with db() as c:
+                c.execute("INSERT INTO users(username,password_hash,created_at) VALUES(?,?,?)", (name, password_hash(pw), int(time.time())))
+        except sqlite3.IntegrityError:
+            return response(start, page("注册失败", '<div class="card msg">用户名已存在。</div>'), "409 Conflict")
+        return redirect(start, "/login")
+    if path == "/login" and method == "POST":
+        f = form_data(env)
+        with db() as c:
+            row = c.execute("SELECT * FROM users WHERE username=?", (f.get("username", ""),)).fetchone()
+        if not row or not password_ok(f.get("password", ""), row["password_hash"]):
+            time.sleep(.3)
+            return response(start, page("登录失败", '<div class="card msg">用户名或密码错误。</div>'), "401 Unauthorized")
+        token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
+        with db() as c:
+            c.execute("DELETE FROM sessions WHERE expires_at<?", (int(time.time()),))
+            c.execute("INSERT INTO sessions VALUES(?,?,?,?)", (hashlib.sha256(token.encode()).hexdigest(), row["id"], csrf, int(time.time()) + 604800))
+        secure = "; Secure" if COOKIE_SECURE else ""
+        return redirect(start, "/", f"wah_session={token}; Path=/; Max-Age=604800; HttpOnly{secure}; SameSite=Lax")
+    if path == "/logout" and method == "POST":
+        f = form_data(env)
+        if not csrf_ok(user, f):
+            return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
+        jar = cookies.SimpleCookie(env.get("HTTP_COOKIE", "")); token = jar.get("wah_session")
+        if token:
+            with db() as c:
+                c.execute("DELETE FROM sessions WHERE token_hash=?", (hashlib.sha256(token.value.encode()).hexdigest(),))
+        secure = "; Secure" if COOKIE_SECURE else ""
+        return redirect(start, "/", f"wah_session=; Path=/; Max-Age=0; HttpOnly{secure}; SameSite=Lax")
+    if path == "/hunt/new" and method == "GET":
+        if not user: return redirect(start, "/login")
+        body = f'''<div class="card"><h1>新建 Hunt</h1><p class="msg">只提交你有权运行的代码。不要提交正在进行的比赛、考试、秘密或恶意代码。</p><form method="post"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>任务标题</label><input name="title" maxlength="120" required placeholder="例如：Harder Horizons 贪心解法"><label>公开题目链接（可选）</label><input name="problem_url" maxlength="500" placeholder="https://..."><label>solution.cpp</label><textarea name="solution_code" maxlength="65536" required></textarea><label>brute.cpp</label><textarea name="brute_code" maxlength="65536" required></textarea><div class="grid"><div><label>测试轮数</label><input type="number" name="iterations" min="1" max="100" value="100"></div><div><label>随机种子</label><input type="number" name="seed" min="0" max="2147483647" value="20261002"></div><div><label>n 范围</label><input name="n_range" value="1,30"></div></div><div class="grid"><div><label>数值最小值</label><input type="number" name="min_value" min="-100000" max="100000" value="1"></div><div><label>数值最大值</label><input type="number" name="max_value" min="-100000" max="100000" value="100000"></div><div></div></div><label><input style="width:auto" type="checkbox" name="consent" value="yes" required> 我有权运行这些代码，并理解未发现差异不代表程序正确。</label><button>加入队列</button></form></div>'''
+        return response(start, page("新建任务", body, user))
+    if path == "/hunt/new" and method == "POST":
+        if not user: return redirect(start, "/login")
+        f = form_data(env)
+        if not csrf_ok(user, f):
+            return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
+        try:
+            title = f.get("title", "").strip()[:120]
+            url = f.get("problem_url", "").strip()[:500]
+            solution, brute = f.get("solution_code", ""), f.get("brute_code", "")
+            iterations = max(1, min(int(f.get("iterations", 100)), MAX_ITERATIONS))
+            seed = max(0, min(int(f.get("seed", 20261002)), 2147483647))
+            min_n, max_n = (int(x.strip()) for x in f.get("n_range", "1,30").split(",", 1))
+            min_value, max_value = int(f.get("min_value", 1)), int(f.get("max_value", 100000))
+            valid_url = not url or re.fullmatch(r"https?://[^\s]+", url)
+            if not title or not solution or not brute or len(solution.encode()) > MAX_CODE or len(brute.encode()) > MAX_CODE:
+                raise ValueError("标题或代码为空/过长")
+            if not (1 <= min_n <= max_n <= 40 and -100000 <= min_value <= max_value <= 100000):
+                raise ValueError("参数超出公开 MVP 范围")
+            if not valid_url or f.get("consent") != "yes":
+                raise ValueError("链接或授权确认无效")
+        except (ValueError, TypeError) as exc:
+            return response(start, page("提交失败", f'<div class="card msg">参数无效：{esc(exc)}</div>', user), "400 Bad Request")
+        with db() as c:
+            active = c.execute("SELECT count(*) FROM hunts WHERE user_id=? AND status IN ('queued','running')", (user["id"],)).fetchone()[0]
+            queued = c.execute("SELECT count(*) FROM hunts WHERE status IN ('queued','running')").fetchone()[0]
+            if active:
+                return response(start, page("队列繁忙", '<div class="card msg">每位用户同时只能有一个活动任务。</div>', user), "409 Conflict")
+            if queued >= MAX_QUEUE:
+                return response(start, page("队列已满", '<div class="card msg">当前队列已满，请稍后再试。</div>', user), "503 Service Unavailable")
+            now = int(time.time())
+            cur = c.execute("""INSERT INTO hunts(user_id,title,problem_url,solution_code,brute_code,
+                iterations,seed,min_n,max_n,min_value,max_value,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (user["id"], title, url, solution, brute, iterations, seed, min_n, max_n,
+                 min_value, max_value, now, now))
+            hunt_id = cur.lastrowid
+        WAKE.set()
+        return redirect(start, f"/hunt/{hunt_id}")
+    if path == "/hunts" and user:
+        with db() as c:
+            rows = c.execute("SELECT id,title,status,created_at,paid_at FROM hunts WHERE user_id=? ORDER BY id DESC LIMIT 100", (user["id"],)).fetchall()
+        trs = ''.join(f'<tr><td><a href="/hunt/{r["id"]}">#{r["id"]}</a></td><td>{esc(r["title"])}</td><td>{esc(status_label(r["status"]))}</td><td>{"已确认" if r["paid_at"] else "—"}</td></tr>' for r in rows)
+        body = '<div class="card"><h1>我的任务</h1><table><tr><th>#</th><th>标题</th><th>状态</th><th>¥1 交付</th></tr>' + (trs or '<tr><td colspan="4">暂无任务</td></tr>') + '</table></div>'
+        return response(start, page("我的任务", body, user))
+    match = re.fullmatch(r"/hunt/(\d+)", path)
+    if match:
+        row = owned_hunt(int(match.group(1)), user)
+        if not row:
+            return response(start, page("未找到", '<div class="card">任务不存在或无权查看。</div>', user), "404 Not Found")
+        cls = "ok" if row["status"] == "found" else ("bad" if row["status"] == "failed" else "warn")
+        extra = ''
+        if row["status"] == "found":
+            extra = f'''<h2>最小化反例</h2><pre>{esc(row['counterexample'])}</pre><table><tr><th>程序</th><th>状态</th><th>输出</th></tr><tr><td>solution</td><td>{esc(row['solution_status'])}</td><td><pre>{esc(row['solution_output'] or '(empty)')}</pre></td></tr><tr><td>brute</td><td>{esc(row['brute_status'])}</td><td><pre>{esc(row['brute_output'] or '(empty)')}</pre></td></tr></table><p><a class="btn" href="/hunt/{row['id']}/counterexample.txt">下载反例</a> <a class="btn secondary" href="/hunt/{row['id']}/report.md">下载报告</a></p>'''
+        body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{extra}<p>¥1 交付状态：<strong>{"已确认" if row['paid_at'] else "尚未确认"}</strong></p></div>'''
+        return response(start, page(f"Hunt #{row['id']}", body, user, 3 if row["status"] in ("queued", "running") else None))
+    match = re.fullmatch(r"/hunt/(\d+)/(counterexample\.txt|report\.md)", path)
+    if match:
+        row = owned_hunt(int(match.group(1)), user)
+        if not row:
+            return response(start, "not found\n", "404 Not Found", content_type="text/plain; charset=utf-8")
+        if match.group(2) == "counterexample.txt":
+            return response(start, row["counterexample"], content_type="text/plain; charset=utf-8", headers=[("Content-Disposition", f'attachment; filename="hunt-{row["id"]}-counterexample.txt"')])
+        return response(start, report_for(row), content_type="text/markdown; charset=utf-8", headers=[("Content-Disposition", f'attachment; filename="hunt-{row["id"]}-report.md"')])
+    if path == "/admin" and user and user["is_admin"]:
+        with db() as c:
+            rows = c.execute("SELECT h.id,h.title,h.status,h.paid_at,u.username FROM hunts h JOIN users u ON u.id=h.user_id ORDER BY h.id DESC LIMIT 100").fetchall()
+        table_rows = []
+        for row in rows:
+            if row["paid_at"]:
+                delivery = "已确认"
+            else:
+                delivery = (f'<form method="post" action="/admin/hunt/{row["id"]}/paid">'
+                            f'<input type="hidden" name="csrf" value="{esc(user["csrf"])}">'
+                            '<button>确认 ¥1</button></form>')
+            table_rows.append(f'<tr><td><a href="/hunt/{row["id"]}">#{row["id"]}</a></td>'
+                              f'<td>{esc(row["username"])}</td><td>{esc(row["title"])}</td>'
+                              f'<td>{esc(status_label(row["status"]))}</td><td>{delivery}</td></tr>')
+        trs = ''.join(table_rows)
+        return response(start, page("管理", '<div class="card"><h1>任务管理</h1><table><tr><th>#</th><th>用户</th><th>任务</th><th>状态</th><th>交付</th></tr>'+trs+'</table></div>', user))
+    match = re.fullmatch(r"/admin/hunt/(\d+)/paid", path)
+    if match and method == "POST" and user and user["is_admin"]:
+        f = form_data(env)
+        if not csrf_ok(user, f):
+            return response(start, page("错误", '<div class="card msg">请求已失效。</div>', user), "403 Forbidden")
+        with db() as c:
+            c.execute("UPDATE hunts SET paid_at=?,updated_at=? WHERE id=? AND status='found'", (int(time.time()), int(time.time()), int(match.group(1))))
+        return redirect(start, "/admin")
+    if path.startswith("/admin") and (not user or not user["is_admin"]):
+        return response(start, page("无权限", '<div class="card msg">需要管理员权限。</div>', user), "403 Forbidden")
+    return response(start, page("未找到", '<div class="card">页面不存在。</div>', user), "404 Not Found")
+
+
+class ThreadedServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+
+if __name__ == "__main__":
+    init_db()
+    if len(os.sys.argv) >= 4 and os.sys.argv[1] == "create-admin":
+        username, password = os.sys.argv[2], os.sys.argv[3]
+        with db() as c:
+            c.execute("INSERT INTO users(username,password_hash,is_admin,created_at) VALUES(?,?,1,?) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash,is_admin=1", (username, password_hash(password), int(time.time())))
+        print("admin created")
+    else:
+        threading.Thread(target=worker_loop, name="hunt-worker", daemon=True).start()
+        with make_server("127.0.0.1", int(os.environ.get("WAH_PORT", "8000")), app,
+                         server_class=ThreadedServer, handler_class=WSGIRequestHandler) as httpd:
+            httpd.serve_forever()
