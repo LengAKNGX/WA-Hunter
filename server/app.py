@@ -703,7 +703,10 @@ def app(env, start):
         oracle = ''
         if row["input_mode"] == "ai" and row["brute_code"] and can_view_delivery(row, user):
             oracle = f'''<h2>AI Oracle（未必正确）</h2><p>{esc(row['oracle_notes'] or '无附加说明')}</p><p class="muted">模型：{esc(row['oracle_model'])}</p><pre>{esc(row['brute_code'])}</pre>'''
-        body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{oracle}{extra}<p>¥1 交付状态：<strong>{esc(payment_state(row))}</strong></p></div>'''
+        problem_link = f'<p>公开题目：<a href="{esc(row["problem_url"])}" target="_blank" rel="noopener">{esc(row["problem_url"])}</a></p>' if row["problem_url"] else ''
+        statement = f'<h3>提交的题面</h3><pre>{esc(row["problem_statement"])}</pre>' if row["problem_statement"] else ''
+        submission = f'''<details><summary>查看提交内容</summary>{problem_link}{statement}<h3>solution.cpp</h3><pre>{esc(row['solution_code'])}</pre></details>'''
+        body = f'''<div class="card"><h1>Hunt #{row['id']} · {esc(row['title'])}</h1><h2 class="{cls}">{esc(status_label(row['status']))}</h2><p>{esc(row['detail'])}</p><p class="muted">测试轮数 {row['iterations']} · seed {row['seed']} · n ∈ [{row['min_n']},{row['max_n']}] · value ∈ [{row['min_value']},{row['max_value']}]</p>{submission}{oracle}{extra}<p>¥1 交付状态：<strong>{esc(payment_state(row))}</strong></p></div>'''
         return response(start, page(f"Hunt #{row['id']}", body, user, 3 if row["status"] in ("oracle_queued", "oracle_running", "queued", "running") else None))
     match = re.fullmatch(r"/hunt/(\d+)/payment-qr/(wechat|alipay)", path)
     if match and method == "GET":

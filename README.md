@@ -15,6 +15,8 @@ first counterexample it finds.
 
 **在线服务 / Live service:** [https://lenga.com.cn](https://lenga.com.cn)
 
+准备邀请同学完整试用时，请直接转发 [WA Hunter 完整试用指南](USER_TEST_GUIDE.md)。
+
 ## 它为什么是 Agent？ / Why is it an agent?
 
 ```mermaid
