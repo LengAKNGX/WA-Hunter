@@ -52,6 +52,11 @@ class OracleValidationTests(unittest.TestCase):
         result, _ = app.minimize([value], lambda a: a[0] <= -(2**62), value, app.INT64_MAX)
         self.assertEqual(result, [-(2**62)])
 
+    def test_large_n_reduces_iteration_budget(self):
+        self.assertEqual(app.MAX_TEST_N, 100000)
+        self.assertEqual(app.bounded_iterations(100, 100000), 10)
+        self.assertEqual(app.bounded_iterations(100, 10000), 100)
+
 
 class PaymentAccessTests(unittest.TestCase):
     def test_delivery_is_locked_until_paid(self):

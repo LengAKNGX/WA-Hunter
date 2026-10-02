@@ -27,7 +27,9 @@ JOB_ROOT = Path(os.environ.get("WAH_JOB_ROOT", "/opt/lenga-oj-jobs"))
 MAX_CODE = 65536
 MAX_STATEMENT = 30000
 MAX_QUEUE = 5
-MAX_TEST_N = 10000
+MAX_TEST_N = 100000
+MAX_GENERATED_VALUES = 1000000
+MAX_INPUT_BYTES = 8 * 1024 * 1024
 INT64_MIN = -(2**63)
 INT64_MAX = 2**63 - 1
 MAX_AI_TASKS_PER_USER_DAY = 3
@@ -181,6 +183,11 @@ def csrf_ok(user, form):
 
 def case_text(values):
     return f"{len(values)}\n{' '.join(map(str, values))}\n"
+
+
+def bounded_iterations(requested, max_n):
+    workload_limit = max(1, MAX_GENERATED_VALUES // max_n)
+    return max(1, min(requested, MAX_ITERATIONS, workload_limit))
 
 
 class Generator:
@@ -355,16 +362,24 @@ def process_oracle(hunt_id):
     with tempfile.TemporaryDirectory(prefix=f"oracle-{hunt_id}-", dir=JOB_ROOT) as work:
         Path(work, "brute.cpp").write_text(oracle["brute_code"], encoding="utf-8")
         compile_oracle(work)
+    iterations = bounded_iterations(row["iterations"], oracle["max_n"])
     with db() as c:
-        c.execute("""UPDATE hunts SET brute_code=?,min_n=?,max_n=?,min_value=?,max_value=?,
+        c.execute("""UPDATE hunts SET brute_code=?,iterations=?,min_n=?,max_n=?,min_value=?,max_value=?,
             oracle_notes=?,oracle_model=?,status='oracle_review',detail=?,updated_at=? WHERE id=?""",
-            (oracle["brute_code"], oracle["min_n"], oracle["max_n"], oracle["min_value"],
+            (oracle["brute_code"], iterations, oracle["min_n"], oracle["max_n"], oracle["min_value"],
              oracle["max_value"], oracle["notes"], model,
              "AI Oracle 已生成并通过编译，等待管理员审核", int(time.time()), hunt_id))
 
 
-def run_one(work, name, values):
-    return limited_process(sandbox_cmd(work, [f"./{name}"], 256, 1), 1.2, case_text(values).encode())
+def run_one(work, name, input_bytes):
+    return limited_process(sandbox_cmd(work, [f"./{name}"], 256, 1), 1.2, input_bytes)
+
+
+def run_pair(work, values):
+    input_bytes = case_text(values).encode()
+    if len(input_bytes) > MAX_INPUT_BYTES:
+        raise RuntimeError(f"生成的输入超过 {MAX_INPUT_BYTES // (1024 * 1024)} MiB 限制")
+    return run_one(work, "solution", input_bytes), run_one(work, "brute", input_bytes)
 
 
 def differs(a, b):
@@ -427,17 +442,18 @@ def process_hunt(hunt_id):
         generator = Generator(row)
         for iteration in range(1, row["iterations"] + 1):
             strategy, values = generator.next()
-            sol, brute = run_one(work, "solution", values), run_one(work, "brute", values)
+            sol, brute = run_pair(work, values)
             failed = differs(sol, brute)
             generator.feedback(strategy, failed)
             if not failed:
                 continue
 
             def predicate(candidate):
-                return differs(run_one(work, "solution", candidate), run_one(work, "brute", candidate))
+                candidate_sol, candidate_brute = run_pair(work, candidate)
+                return differs(candidate_sol, candidate_brute)
 
             minimized, checks = minimize(values, predicate, row["min_value"], row["max_value"])
-            sol, brute = run_one(work, "solution", minimized), run_one(work, "brute", minimized)
+            sol, brute = run_pair(work, minimized)
             with db() as c:
                 c.execute("""UPDATE hunts SET status='found',strategy=?,found_iteration=?,
                     original_case=?,counterexample=?,solution_status=?,brute_status=?,
@@ -597,7 +613,7 @@ def app(env, start):
         return redirect(start, "/", f"wah_session=; Path=/; Max-Age=0; HttpOnly{secure}; SameSite=Lax")
     if path == "/hunt/new" and method == "GET":
         if not user: return redirect(start, "/login")
-        body = f'''<div class="card"><h1>新建 Hunt</h1><p class="msg">只提交你有权运行的代码。不要提交正在进行的比赛、考试、秘密或恶意代码。</p><p><a class="btn" href="/hunt/ai">AI 帮我生成 Oracle</a></p><h2>或手动提供 brute.cpp</h2><p class="muted">brute.cpp 必须是独立的可信实现，不能与 solution.cpp 相同。服务支持 n ≤ {MAX_TEST_N}，元素值支持完整有符号 long long 范围。请仍按原题约束填写；范围越大，暴力解越可能超时。</p><form method="post"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>任务标题</label><input name="title" maxlength="120" required placeholder="例如：Harder Horizons 贪心解法"><label>公开题目链接（可选）</label><input name="problem_url" maxlength="500" placeholder="https://..."><label>solution.cpp</label><textarea name="solution_code" maxlength="65536" required></textarea><label>brute.cpp（必须与候选解独立）</label><textarea name="brute_code" maxlength="65536" required></textarea><div class="grid"><div><label>测试轮数</label><input type="number" name="iterations" min="1" max="100" value="100"></div><div><label>随机种子</label><input type="number" name="seed" min="0" max="2147483647" value="20261002"></div><div><label>测试 n 范围（最大 {MAX_TEST_N}）</label><input name="n_range" value="1,30"></div></div><div class="grid"><div><label>数值最小值（long long）</label><input type="text" inputmode="numeric" name="min_value" value="1"></div><div><label>数值最大值（long long）</label><input type="text" inputmode="numeric" name="max_value" value="100000"></div><div></div></div><p class="muted">允许范围：-9223372036854775808 至 9223372036854775807。浏览器无法精确表示如此大的 number，因此这里使用文本输入并由服务器校验整数。</p><label><input style="width:auto" type="checkbox" name="consent" value="yes" required> 我有权运行这些代码，并理解未发现差异不代表程序正确。</label><button>加入队列</button></form></div>'''
+        body = f'''<div class="card"><h1>新建 Hunt</h1><p class="msg">只提交你有权运行的代码。不要提交正在进行的比赛、考试、秘密或恶意代码。</p><p><a class="btn" href="/hunt/ai">AI 帮我生成 Oracle</a></p><h2>或手动提供 brute.cpp</h2><p class="muted">brute.cpp 必须是独立的可信实现，不能与 solution.cpp 相同。服务支持 n ≤ {MAX_TEST_N}，元素值支持完整有符号 long long 范围。请仍按原题约束填写；范围越大，暴力解越可能超时。系统会按“测试轮数 × max_n ≤ {MAX_GENERATED_VALUES}”自动降低大规模任务的轮数。</p><form method="post"><input type="hidden" name="csrf" value="{esc(user['csrf'])}"><label>任务标题</label><input name="title" maxlength="120" required placeholder="例如：Harder Horizons 贪心解法"><label>公开题目链接（可选）</label><input name="problem_url" maxlength="500" placeholder="https://..."><label>solution.cpp</label><textarea name="solution_code" maxlength="65536" required></textarea><label>brute.cpp（必须与候选解独立）</label><textarea name="brute_code" maxlength="65536" required></textarea><div class="grid"><div><label>测试轮数（大规模时自动调整）</label><input type="number" name="iterations" min="1" max="100" value="100"></div><div><label>随机种子</label><input type="number" name="seed" min="0" max="2147483647" value="20261002"></div><div><label>测试 n 范围（最大 {MAX_TEST_N}）</label><input name="n_range" value="1,30"></div></div><div class="grid"><div><label>数值最小值（long long）</label><input type="text" inputmode="numeric" name="min_value" value="1"></div><div><label>数值最大值（long long）</label><input type="text" inputmode="numeric" name="max_value" value="100000"></div><div></div></div><p class="muted">允许范围：-9223372036854775808 至 9223372036854775807。浏览器无法精确表示如此大的 number，因此这里使用文本输入并由服务器校验整数。</p><label><input style="width:auto" type="checkbox" name="consent" value="yes" required> 我有权运行这些代码，并理解未发现差异不代表程序正确。</label><button>加入队列</button></form></div>'''
         return response(start, page("新建任务", body, user))
     if path == "/hunt/ai" and method == "GET":
         if not user: return redirect(start, "/login")
@@ -667,6 +683,7 @@ def app(env, start):
                 raise ValueError(f"测试 n 范围必须满足 1 ≤ min_n ≤ max_n ≤ {MAX_TEST_N}")
             if not INT64_MIN <= min_value <= max_value <= INT64_MAX:
                 raise ValueError("数值必须是有符号 long long，范围为 [-9223372036854775808, 9223372036854775807]，且最小值不能大于最大值")
+            iterations = bounded_iterations(iterations, max_n)
             if not valid_url or f.get("consent") != "yes":
                 raise ValueError("链接或授权确认无效")
         except (ValueError, TypeError) as exc:
