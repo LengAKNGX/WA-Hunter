@@ -1,6 +1,6 @@
 \documentclass[10pt,a4paper]{ctexart}
 \usepackage[top=1.65cm,bottom=1.75cm,left=1.8cm,right=1.8cm,headheight=18pt,headsep=4pt,footskip=18pt]{geometry}
-\usepackage{xcolor}
+\usepackage[table]{xcolor}
 \usepackage{booktabs,tabularx,array,longtable}
 \usepackage{enumitem}
 \usepackage{fancyhdr}
@@ -11,6 +11,7 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{microtype}
 \usepackage{amsmath}
+\usepackage[most]{tcolorbox}
 
 \definecolor{navy}{HTML}{17365D}
 \definecolor{blue}{HTML}{2F75B5}
@@ -29,21 +30,22 @@
 
 \hypersetup{pdftitle={WA Hunter Week 5--6 工作报告},pdfauthor={WA Hunter 项目组}}
 \setlength{\parindent}{1.5em}
-\setlength{\parskip}{0pt}
+\setlength{\parskip}{1.5pt}
+\linespread{1.055}
 \setlist[itemize]{leftmargin=1.7em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
 \setlist[enumerate]{leftmargin=1.8em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
 \renewcommand{\arraystretch}{1.02}
 \setlength{\tabcolsep}{4pt}
 
-\titleformat{\section}{\large\bfseries\color{navy}}{\thesection}{0.5em}{}[\vspace{-0.15em}\color{linegray}\titlerule]
-\titleformat{\subsection}{\normalsize\bfseries\color{blue}}{\thesubsection}{0.45em}{}
-\titlespacing*{\section}{0pt}{0.75em}{0.25em}
-\titlespacing*{\subsection}{0pt}{0.55em}{0.15em}
+\titleformat{\section}{\large\bfseries\color{navy}}{\colorbox{blue}{\makebox[1.65em][c]{\color{white}\thesection}}}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{blue}}{\textcolor{blue}{\rule{0.32em}{0.32em}}\hspace{0.35em}\thesubsection}{0.45em}{}
+\titlespacing*{\section}{0pt}{0.9em}{0.35em}
+\titlespacing*{\subsection}{0pt}{0.65em}{0.2em}
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\sffamily\scriptsize\color{graytext}WA Hunter}
-\fancyhead[R]{\sffamily\scriptsize\color{graytext}Week 5--6 工作报告}
+\fancyhead[L]{\sffamily\scriptsize\color{graytext}WA Hunter · Data Structures \& Algorithms II}
+\fancyhead[R]{}
 \fancyfoot[C]{\sffamily\scriptsize\color{graytext}\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 \renewcommand{\headrule}{\hbox to\headwidth{\color{linegray}\leaders\hrule height \headrulewidth\hfill}}
@@ -51,22 +53,26 @@
 \lstset{basicstyle=\ttfamily\small,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{linegray},breaklines=true,columns=fullflexible,xleftmargin=0.5em,xrightmargin=0.5em,aboveskip=0.6em,belowskip=0.6em}
 \newcommand{\code}[1]{\texttt{#1}}
 \newenvironment{resultbox}[2]{%
-  \par\smallskip\noindent
-  \colorbox{lightblue}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small\bfseries\color{navy}#1\par\normalfont\scriptsize\color{graytext}#2}}\par\vspace{1pt}
-}{\par\smallskip}
+  \begin{tcolorbox}[enhanced,breakable,colback=lightblue,colframe=blue,boxrule=0pt,
+    borderline west={2.5pt}{0pt}{blue},arc=1.5mm,left=2.8mm,right=2.8mm,
+    top=1.8mm,bottom=1.8mm,before skip=4pt,after skip=5pt]
+  {\small\bfseries\color{navy}#1}\hfill{\scriptsize\color{blue}#2}\par\smallskip
+  \color{graytext}\small
+}{\end{tcolorbox}}
 
 \begin{document}
 
-\begin{center}
-{\sffamily\bfseries\fontsize{22}{27}\selectfont\color{navy}WA Hunter Week 5--6 工作报告\par}
-\vspace{0.25em}
-{\small 面向可解释差分测试的运行统计、报告增强与后续算法设想\par}
-\vspace{0.35em}
-{\footnotesize\color{graytext}测试覆盖 · 语义澄清 · 日志压缩 · 演进设计\par}
+\begin{tcolorbox}[enhanced,colback=navy,colframe=navy,arc=4mm,boxrule=0pt,
+  left=9mm,right=9mm,top=7mm,bottom=7mm,before skip=2pt,after skip=8pt,
+  overlay={\fill[blue] (frame.south west) rectangle ([xshift=5mm]frame.north west);}]
+{\sffamily\bfseries\fontsize{22}{27}\selectfont\color{white}WA Hunter\par}
+\vspace{0.15em}
+{\sffamily\bfseries\fontsize{16}{20}\selectfont\color{white}Week 5--6 工作报告\par}
 \vspace{0.55em}
-{\color{linegray}\rule{\textwidth}{0.7pt}\par}
-\vspace{0.5em}
-\end{center}
+{\small\color{white!92}面向可解释差分测试的运行统计、报告增强与后续算法设想\par}
+\vspace{0.45em}
+{\footnotesize\color{white!70}测试覆盖 \quad·\quad 语义澄清 \quad·\quad 日志压缩 \quad·\quad 演进设计}
+\end{tcolorbox}
 \small
 
 \section{阶段概述}
@@ -101,6 +107,7 @@
 
 \begin{table}[htbp]
 \centering\footnotesize
+\rowcolors{2}{lightblue!65}{white}
 \begin{tabularx}{0.96\textwidth}{>{\bfseries\color{navy}}p{0.23\textwidth} X}
 \toprule
 指标 & 解释 \\
@@ -113,6 +120,7 @@
 Hunt 总耗时 & 从开始搜索到结束或发现反例的墙钟耗时 \\
 \bottomrule
 \end{tabularx}
+\rowcolors{2}{}{}
 \caption{新增测试覆盖统计}
 \end{table}
 
@@ -189,6 +197,7 @@ python -m unittest discover -s tests -v
 
 \begin{table}[htbp]
 \centering
+\rowcolors{2}{lightblue!65}{white}
 \begin{tabular}{lr}
 \toprule
 指标 & 结果 \\
@@ -201,6 +210,7 @@ python -m unittest discover -s tests -v
 Oracle 异常 & 0 \\
 \bottomrule
 \end{tabular}
+\rowcolors{2}{}{}
 \caption{示例任务运行统计}
 \end{table}
 
@@ -256,6 +266,7 @@ WA Hunter 不应被描述为“AI 判断代码是否正确”。更准确的定�
 
 \begin{table}[htbp]
 \centering\footnotesize
+\rowcolors{2}{lightblue!65}{white}
 \begin{tabularx}{0.94\textwidth}{>{\bfseries\color{navy}}p{0.24\textwidth} X}
 \toprule
 结果 & 严格含义 \\
@@ -265,6 +276,7 @@ WA Hunter 不应被描述为“AI 判断代码是否正确”。更准确的定�
 任务无效或失败 & 输入、Oracle、编译或运行环境不足以形成可信结论 \\
 \bottomrule
 \end{tabularx}
+\rowcolors{2}{}{}
 \caption{三类结果的语义边界}
 \end{table}
 
