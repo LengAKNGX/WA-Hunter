@@ -1,0 +1,307 @@
+\documentclass[10pt,a4paper]{ctexart}
+\usepackage[top=1.65cm,bottom=1.75cm,left=1.8cm,right=1.8cm,headheight=18pt,headsep=4pt,footskip=18pt]{geometry}
+\usepackage{xcolor}
+\usepackage{booktabs,tabularx,array,longtable}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage{amsmath}
+
+\definecolor{navy}{HTML}{17365D}
+\definecolor{blue}{HTML}{2F75B5}
+\definecolor{lightblue}{HTML}{EAF2F8}
+\definecolor{graytext}{HTML}{4F5B66}
+\definecolor{linegray}{HTML}{D8DEE4}
+\definecolor{codebg}{HTML}{F6F8FA}
+\definecolor{green}{HTML}{2E7D32}
+
+\setmainfont{TeX Gyre Pagella}
+\setsansfont{TeX Gyre Heros}
+\setmonofont{DejaVu Sans Mono}
+\setCJKmainfont{FandolSong-Regular}
+\setCJKsansfont{FandolHei-Regular}
+\setCJKmonofont{FandolFang-Regular}
+
+\hypersetup{pdftitle={WA Hunter Week 5--6 工作报告},pdfauthor={WA Hunter 项目组}}
+\setlength{\parindent}{1.5em}
+\setlength{\parskip}{0pt}
+\setlist[itemize]{leftmargin=1.7em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
+\setlist[enumerate]{leftmargin=1.8em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
+\renewcommand{\arraystretch}{1.02}
+\setlength{\tabcolsep}{4pt}
+
+\titleformat{\section}{\large\bfseries\color{navy}}{\thesection}{0.5em}{}[\vspace{-0.15em}\color{linegray}\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{blue}}{\thesubsection}{0.45em}{}
+\titlespacing*{\section}{0pt}{0.75em}{0.25em}
+\titlespacing*{\subsection}{0pt}{0.55em}{0.15em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\sffamily\scriptsize\color{graytext}WA Hunter}
+\fancyhead[R]{\sffamily\scriptsize\color{graytext}Week 5--6 工作报告}
+\fancyfoot[C]{\sffamily\scriptsize\color{graytext}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{linegray}\leaders\hrule height \headrulewidth\hfill}}
+
+\lstset{basicstyle=\ttfamily\small,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{linegray},breaklines=true,columns=fullflexible,xleftmargin=0.5em,xrightmargin=0.5em,aboveskip=0.6em,belowskip=0.6em}
+\newcommand{\code}[1]{\texttt{#1}}
+\newenvironment{resultbox}[2]{%
+  \par\smallskip\noindent
+  \colorbox{lightblue}{\parbox{\dimexpr\linewidth-2\fboxsep}{\small\bfseries\color{navy}#1\par\normalfont\scriptsize\color{graytext}#2}}\par\vspace{1pt}
+}{\par\smallskip}
+
+\begin{document}
+
+\begin{center}
+{\sffamily\bfseries\fontsize{22}{27}\selectfont\color{navy}WA Hunter Week 5--6 工作报告\par}
+\vspace{0.25em}
+{\small 面向可解释差分测试的运行统计、报告增强与后续算法设想\par}
+\vspace{0.35em}
+{\footnotesize\color{graytext}测试覆盖 · 语义澄清 · 日志压缩 · 演进设计\par}
+\vspace{0.55em}
+{\color{linegray}\rule{\textwidth}{0.7pt}\par}
+\vspace{0.5em}
+\end{center}
+\small
+
+\section{阶段概述}
+
+前一阶段已经完成 Web 提交、AI Oracle、沙箱执行、反例审核和支付交付流程。本阶段没有继续扩大业务范围，而是回到测试引擎本身，围绕“Agent 实际测试了什么、未找到反例究竟意味着什么”进行小规模优化。
+
+原有系统能够给出“找到”或“未找到”结论，但对搜索过程的解释较弱。例如，当 200 轮测试全部一致时，用户无法直接看到七种策略的实际使用次数、生成数据总量以及程序是否出现过异常。为此，本阶段增加运行统计，增强找到与未找到两类报告，并压缩长任务中的重复日志。
+
+\begin{resultbox}{本阶段定位}{不增加新的业务模块，优先提高结果的可解释性和实验可量化程度。}
+完成内容包括测试覆盖统计、报告语义增强、日志检查点和对应自动化测试；覆盖引导与变形测试等内容作为后续设想提出，不作为已完成功能。
+\end{resultbox}
+
+\section{问题分析}
+
+\subsection{单一结论缺少覆盖依据}
+
+旧版未找到报告只记录测试轮数和随机种子。虽然“未找到不代表正确”已经写入说明，但缺少实际覆盖数据，用户仍然无法判断这次搜索是否包含边界、重复、单调和极值结构。
+
+\subsection{成功报告与搜索过程割裂}
+
+找到反例时，旧版报告重点展示最小反例和最终输出，却没有说明发现前已经运行了多少数据、各种策略分别贡献了多少测试。这样不利于后续评价策略质量，也难以形成课程实验数据。
+
+\subsection{长任务日志重复}
+
+当任务运行数百轮时，每轮输出一行 \code{result=same} 会淹没真正重要的信息。日志过多不会提高测试质量，反而使故障和检查点更难定位。
+
+\section{已实现优化}
+
+\subsection{统一运行统计结构}
+
+命令行引擎新增 \code{HuntStats}，在每轮测试后以确定性方式累积以下指标：
+
+\begin{table}[htbp]
+\centering\footnotesize
+\begin{tabularx}{0.96\textwidth}{>{\bfseries\color{navy}}p{0.23\textwidth} X}
+\toprule
+指标 & 解释 \\
+\midrule
+实际执行用例数 & 搜索真正完成的差分测试轮数 \\
+生成元素总量 & 所有数组长度之和，用于刻画实际工作量 \\
+平均与最大 $n$ & 展示本次测试所覆盖的数据规模 \\
+策略执行次数 & 分别统计七种数组生成策略 \\
+非正常运行次数 & 候选程序与 Oracle 的超时或运行异常数量 \\
+Hunt 总耗时 & 从开始搜索到结束或发现反例的墙钟耗时 \\
+\bottomrule
+\end{tabularx}
+\caption{新增测试覆盖统计}
+\end{table}
+
+统计模块不改变数据生成和差异判断，只观察并记录搜索过程，因此不会影响原有结果的可复现性。
+
+\subsection{增强未找到报告}
+
+新版报告将“未找到”解释为：候选解与 Oracle 在已生成用例上的行为相同，而不是程序已被证明正确。报告同时附带测试覆盖、合法范围和复现参数，使用户能够判断是否需要增加预算、调整范围或增加特定策略。
+
+\begin{lstlisting}
+No discrepancy was found within the configured test budget.
+This is not a proof of correctness.
+
+Executed cases: 200
+Generated elements: 3028
+Average / maximum n: 15.1 / 30
+\end{lstlisting}
+
+\subsection{增强成功报告}
+
+发现差异时，报告除最小反例、两份程序状态和最小化检查次数外，还记录差异出现前的覆盖统计。这样可以回答“由哪种策略发现”“发现前运行了多少轮”“其他策略是否得到覆盖”等问题。
+
+\subsection{压缩重复日志}
+
+日志规则调整为仅输出：
+\begin{itemize}
+  \item 最初七轮，证明全部基础策略至少被执行一次；
+  \item 每隔 \code{progress\_interval} 轮的进度检查点；
+  \item 所有真正产生差异的轮次。
+\end{itemize}
+
+默认间隔为 25。该优化只减少重复显示，不减少测试用例数量。
+
+\section{优化后的处理流程}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\textwidth}{!}{\begin{tikzpicture}[
+  node distance=7mm and 7mm,
+  box/.style={draw=blue,rounded corners=3pt,fill=lightblue,minimum width=2.7cm,minimum height=9mm,align=center,font=\scriptsize},
+  decision/.style={diamond,draw=blue,fill=lightblue,aspect=2.0,align=center,font=\scriptsize,inner sep=1.2pt},
+  arrow/.style={-{Latex[length=2mm]},thick,color=graytext}
+]
+\node[box] (select) {选择生成策略};
+\node[box,right=of select] (run) {生成输入并执行\\两份程序};
+\node[box,right=of run] (record) {记录覆盖统计\\与程序状态};
+\node[decision,right=9mm of record] (diff) {是否\\存在差异};
+\node[box,below left=8mm and 0mm of diff] (continue) {无差异：继续搜索\\或输出覆盖报告};
+\node[box,below right=8mm and 0mm of diff] (min) {有差异：最小化\\并补充搜索统计};
+\draw[arrow] (select)--(run); \draw[arrow] (run)--(record); \draw[arrow] (record)--(diff);
+\draw[arrow] (diff)--(continue); \draw[arrow] (diff)--(min);
+\end{tikzpicture}}
+\caption{加入统计后的 Agent 搜索流程}
+\end{figure}
+
+统计层位于程序执行之后、差异分支之前，因此无论最终结果如何，都能形成统一记录。该设计也为未来覆盖引导搜索提供数据接口。
+
+\section{验证结果}
+
+项目重新运行全部自动化测试：
+
+\begin{lstlisting}
+python -m unittest discover -s tests -v
+\end{lstlisting}
+
+当前共 16 项测试通过。新增测试验证：
+\begin{itemize}
+  \item 策略计数、元素总量和异常运行计数正确；
+  \item 覆盖统计能够正确写入 Markdown；
+  \item 最初策略、定期检查点和失败轮次不会被日志压缩遗漏。
+\end{itemize}
+
+默认示例运行 200 轮后的统计如下：
+
+\begin{table}[htbp]
+\centering
+\begin{tabular}{lr}
+\toprule
+指标 & 结果 \\
+\midrule
+实际执行用例 & 200 \\
+生成元素总数 & 3028 \\
+平均数组长度 & 15.1 \\
+最大数组长度 & 30 \\
+候选程序异常 & 0 \\
+Oracle 异常 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{示例任务运行统计}
+\end{table}
+
+七种策略均实际参与测试。该示例没有发现差异，因此结果被表述为“预算内未观察到差异”，不被包装成程序正确性证明。
+
+\section{进一步设计设想}
+
+以下内容是下一阶段的设计方向，尚未全部实现。
+
+\subsection{覆盖引导搜索}
+
+当前反馈主要来自运行异常和最终差异。未来可对候选程序进行轻量插桩，把新分支覆盖作为奖励信号：
+
+\[
+R=\alpha\,\Delta B+\beta\,S_{\mathrm{unusual}}+\gamma\,D_{\mathrm{output}},
+\]
+
+其中 $\Delta B$ 表示新增分支数，$S_{\mathrm{unusual}}$ 表示异常状态，$D_{\mathrm{output}}$ 表示输出距离。即使尚未发现反例，Agent 也能优先保留带来新覆盖的策略。
+
+\subsection{变形测试}
+
+当可信 Oracle 难以编写时，可通过输入变换和输出关系发现自相矛盾。例如排序题打乱输入不应改变最终有序序列；最值问题加入更小元素后答案不应减小。未来可把差分测试和 Metamorphic Testing 作为两种独立证据来源。
+
+\subsection{分阶段预算}
+
+将搜索分为快速筛查、定向搜索和压力验证三个阶段。快速筛查优先运行小规模边界数据；定向搜索根据覆盖反馈调整权重；只有前两阶段仍有探索价值时才扩大规模。这样能够减少无效计算。
+
+\subsection{Oracle 可信度分级}
+
+可将 Oracle 标记为人工实现并通过样例验证、AI 生成且经人工审核、仅自动编译通过三个等级。只有达到规定等级的 Oracle 才能用于收费结论，从界面和报告层面区分“观察到差异”与“可以交付的有效反例”。
+
+\subsection{受限输入模式}
+
+未来可用受限 JSON Schema 描述字符串、图、查询序列和多组测试。生成器按照结构化约束产生输入，而不是让 LLM 自由生成文本，从而在扩展题型时保留合法性检查。
+
+\section{评价指标设想}
+
+新增统计为后续实验评价提供了基础。计划逐步记录：
+\begin{itemize}
+  \item 已知错误任务的反例发现率；
+  \item 首次发现反例所需轮数；
+  \item 原始输入与最小反例的规模压缩率；
+  \item 各生成策略的反例贡献率；
+  \item 单任务耗时、服务器资源和 API 成本；
+  \item 真实任务中付款与最终交付的转化比例。
+\end{itemize}
+
+这些指标可将项目报告从功能描述推进为可重复的实验分析，并帮助判断复杂优化是否真正有收益。
+
+\section{对 Agent 定位的进一步认识}
+
+WA Hunter 不应被描述为“AI 判断代码是否正确”。更准确的定义是：在明确的合法输入空间和计算预算内，Agent 组织多种生成策略，调用候选程序与可信 Oracle，根据反馈调整搜索，并将差异压缩为可复现证据。
+
+\begin{table}[htbp]
+\centering\footnotesize
+\begin{tabularx}{0.94\textwidth}{>{\bfseries\color{navy}}p{0.24\textwidth} X}
+\toprule
+结果 & 严格含义 \\
+\midrule
+找到有效反例 & 在合法输入上得到可复现差异，并通过 Oracle 与约束审核 \\
+未找到反例 & 当前预算和策略覆盖内没有观察到差异，不证明程序正确 \\
+任务无效或失败 & 输入、Oracle、编译或运行环境不足以形成可信结论 \\
+\bottomrule
+\end{tabularx}
+\caption{三类结果的语义边界}
+\end{table}
+
+用户购买的是一个经过验证和最小化的有效反例，而不是程序正确性的保证。该定位也决定了系统必须保留覆盖记录、合法性审核和交付门禁。
+
+\newpage
+\section{阶段成果与下一步}
+
+\subsection{已完成内容}
+\begin{itemize}
+  \item 新增 \code{HuntStats} 测试过程统计结构；
+  \item 记录用例数、元素数、平均与最大规模、策略次数和异常次数；
+  \item 同时增强找到与未找到两类报告；
+  \item 明确“未找到不等于正确”的语义；
+  \item 增加可配置日志检查点并压缩重复输出；
+  \item 新增对应自动化测试，全部测试持续通过。
+\end{itemize}
+
+\subsection{下一步计划}
+\begin{enumerate}
+  \item 将命令行统计同步到线上任务详情页和数据库；
+  \item 增加最小化压缩率与策略贡献率统计；
+  \item 选择一种简单变形关系完成原型；
+  \item 邀请真实用户完成任务，优先验证第一笔 1 CNY 商业闭环；
+  \item 根据真实任务数据决定是否开发覆盖引导搜索。
+\end{enumerate}
+
+\subsection{风险边界与验收标准}
+
+后续优化仍应遵守三个边界。第一，覆盖率提升不等于正确性证明，最终收费结论仍需合法输入与可信 Oracle；第二，统计信息不能显著增加单任务的运行成本；第三，扩展输入格式时应优先采用可验证的结构化约束，而不是依赖模型自由生成。
+
+下一阶段可按以下标准验收：线上任务页能够展示与 CLI 一致的覆盖统计；统计字段在服务重启后仍可查询；至少一种变形关系可以稳定发现人工植入的错误；新增机制不会绕过现有的管理员审核和支付门禁。
+
+\section{阶段结论}
+
+本阶段没有增加新的业务模块，而是提高了 WA Hunter 的可解释性。系统现在能够说明“实际测试了什么”，并将有限测试结论与正确性证明明确区分。
+
+新增统计规模不大，但为覆盖引导、策略评价和实验量化建立了统一数据基础。后续应优先把统计接入线上服务，并通过真实任务检验这些信息是否能帮助用户理解结果和作出付款决策。
+
+\end{document}
