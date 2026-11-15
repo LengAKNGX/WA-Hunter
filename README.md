@@ -117,6 +117,11 @@ Issue、附件和评论默认公开。不要上传私有作业、比赛中仍保
 
 ## 在线服务 / Hosted service
 
+核心搜索算法位于 `server/core.py`，由本地 CLI 和线上 Worker 共同调用。该模块不
+依赖数据库、Web、子进程或第三方库，只负责确定性的数组生成、输入编码和反例最小化。
+执行环境分别由 CLI 本地适配器和服务端 Firejail 适配器负责，避免安全代码与搜索
+算法互相耦合。详细分层见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
 `lenga.com.cn` 已部署受控版本：注册用户既可以提交两份 C++17 源码，也可以提交
 题面与候选解，由 DeepSeek Flash 生成待审核 Oracle。任务通过单并发后台队列进入
 Firejail，在私有结果页查看反例和报告。候选解不会发送给模型。生产迁移、安全边界
@@ -132,7 +137,7 @@ AI Hunt 要求用户结构化填写题目合法范围。该范围作为后端权
 ```powershell
 python -m unittest discover -s tests -v
 python -m py_compile wa_hunter.py
-python -m py_compile server/app.py
+python -m py_compile server/app.py server/core.py
 ```
 
 项目采用 [MIT License](LICENSE)。欢迎提交 Bug、测试策略和新的输入模型。

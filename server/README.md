@@ -3,6 +3,11 @@
 This directory contains the production WA Hunter web service currently used by
 `lenga.com.cn`.
 
+`app.py` and `core.py` form one deployable unit. Always install and update both
+files together: `app.py` owns Web, persistence, queueing, sandbox execution, and
+payment state; `core.py` owns the deterministic generator and minimizer shared
+with the CLI.
+
 It intentionally uses only the Python standard library. The service provides:
 
 - registration, login, CSRF protection, secure cookies, and private results;

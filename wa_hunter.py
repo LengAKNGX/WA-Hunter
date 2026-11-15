@@ -6,13 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import random
 import shlex
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from server.core import ArrayGenerator, encode_case, minimize
 
 
 @dataclass
@@ -97,10 +98,6 @@ def compile_cpp(source: Path, output: Path, cfg: dict) -> None:
         raise RuntimeError(f"Compilation failed: {source}\n{result.stderr}")
 
 
-def encode_case(values: list[int]) -> str:
-    return f"{len(values)}\n{' '.join(map(str, values))}\n"
-
-
 def run_program(executable: Path, values: list[int], timeout: float) -> RunResult:
     start = time.perf_counter()
     try:
@@ -125,108 +122,6 @@ def differs(a: RunResult, b: RunResult) -> bool:
 def should_log_iteration(iteration: int, failed: bool, progress_interval: int) -> bool:
     """Keep logs readable while always showing initial strategy coverage and failures."""
     return failed or iteration <= len(ArrayGenerator.STRATEGIES) or iteration % progress_interval == 0
-
-
-class ArrayGenerator:
-    STRATEGIES = [
-        "random", "boundary", "all_equal", "increasing", "decreasing",
-        "many_duplicates", "extreme_mix",
-    ]
-
-    def __init__(self, cfg: dict, rng: random.Random):
-        self.cfg, self.rng = cfg, rng
-        self.weights = {name: 1 for name in self.STRATEGIES}
-        self.cursor = 0
-
-    def next_case(self) -> tuple[str, list[int]]:
-        # Guarantee coverage first; later select strategies using feedback-adjusted weights.
-        if self.cursor < len(self.STRATEGIES):
-            strategy = self.STRATEGIES[self.cursor]
-            self.cursor += 1
-        else:
-            strategy = self.rng.choices(
-                self.STRATEGIES, weights=[self.weights[x] for x in self.STRATEGIES], k=1
-            )[0]
-        return strategy, self._make(strategy)
-
-    def feedback(self, strategy: str, interesting: bool) -> None:
-        # Agent feedback: favor strategies producing a failure or unusual execution status.
-        self.weights[strategy] = min(8, self.weights[strategy] + (3 if interesting else 0))
-
-    def _n(self) -> int:
-        return self.rng.randint(self.cfg["min_n"], self.cfg["max_n"])
-
-    def _make(self, strategy: str) -> list[int]:
-        lo, hi, n = self.cfg["min_value"], self.cfg["max_value"], self._n()
-        if strategy == "random":
-            return [self.rng.randint(lo, hi) for _ in range(n)]
-        if strategy == "boundary":
-            # All-negative data catches a common max-subarray initialization bug.
-            negatives = [x for x in (lo, -1) if lo <= x <= hi and x < 0]
-            if negatives:
-                return [self.rng.choice(negatives) for _ in range(n)]
-            return [lo, hi][:n] if n <= 2 else [lo] + [hi] * (n - 1)
-        if strategy == "all_equal":
-            return [self.rng.choice([lo, hi, 0] if lo <= 0 <= hi else [lo, hi])] * n
-        if strategy == "increasing":
-            return sorted(self.rng.randint(lo, hi) for _ in range(n))
-        if strategy == "decreasing":
-            return sorted((self.rng.randint(lo, hi) for _ in range(n)), reverse=True)
-        if strategy == "many_duplicates":
-            pool = [self.rng.randint(lo, hi) for _ in range(min(3, n))]
-            return [self.rng.choice(pool) for _ in range(n)]
-        pool = [lo, hi]
-        if lo <= 0 <= hi:
-            pool.append(0)
-        return [pool[i % len(pool)] for i in range(n)]
-
-
-def minimize(values: list[int], predicate, min_value: int | None = None,
-             max_value: int | None = None) -> tuple[list[int], int]:
-    current, checks = values[:], 0
-    # Delta debugging by chunks: remove increasingly small portions while failure remains.
-    granularity = 2
-    while len(current) >= 2:
-        chunk = max(1, (len(current) + granularity - 1) // granularity)
-        reduced = False
-        for start in range(0, len(current), chunk):
-            candidate = current[:start] + current[start + chunk:]
-            if not candidate:
-                continue
-            checks += 1
-            if predicate(candidate):
-                current, reduced = candidate, True
-                granularity = max(2, granularity - 1)
-                break
-        if not reduced:
-            if granularity >= len(current):
-                break
-            granularity = min(len(current), granularity * 2)
-
-    # Greedily shrink each value toward simple representatives.
-    for i in range(len(current)):
-        original = current[i]
-        candidates = [0]
-        if original != 0:
-            candidates += [1 if original > 0 else -1]
-            x = original
-            while abs(x) > 1:
-                x = x // 2 if x >= 0 else -((-x) // 2)
-                candidates.append(x)
-        for value in dict.fromkeys(candidates):
-            if min_value is not None and value < min_value:
-                continue
-            if max_value is not None and value > max_value:
-                continue
-            if value == current[i]:
-                continue
-            candidate = current[:]
-            candidate[i] = value
-            checks += 1
-            if predicate(candidate):
-                current = candidate
-                break
-    return current, checks
 
 
 def fenced(text: str) -> str:
@@ -315,8 +210,7 @@ def main() -> int:
     compile_cpp(root / args.solution, solution_exe, cfg)
     compile_cpp(root / args.brute, brute_exe, cfg)
 
-    rng, generator = random.Random(cfg["seed"]), ArrayGenerator(cfg, random.Random(cfg["seed"]))
-    del rng  # generator owns the deterministic random stream
+    generator = ArrayGenerator(cfg)
     stats, hunt_start = HuntStats(), time.perf_counter()
     for iteration in range(1, cfg["iterations"] + 1):
         strategy, values = generator.next_case()

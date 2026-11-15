@@ -5,7 +5,6 @@ import hmac
 import html
 import json
 import os
-import random
 import re
 import secrets
 import sqlite3
@@ -20,6 +19,11 @@ from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs
 from urllib.request import Request, urlopen
 from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
+
+try:
+    from .core import ArrayGenerator, encode_case, minimize as minimize_case
+except ImportError:  # Production executes app.py directly with core.py beside it.
+    from core import ArrayGenerator, encode_case, minimize as minimize_case
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("WAH_DB", BASE / "data" / "oj.db"))
@@ -185,8 +189,7 @@ def csrf_ok(user, form):
     return bool(user and hmac.compare_digest(user["csrf"], form.get("csrf", "")))
 
 
-def case_text(values):
-    return f"{len(values)}\n{' '.join(map(str, values))}\n"
+case_text = encode_case
 
 
 def bounded_iterations(requested, max_n):
@@ -203,47 +206,7 @@ def authoritative_constraints(row):
     }
 
 
-class Generator:
-    strategies = ["random", "boundary", "all_equal", "increasing", "decreasing", "many_duplicates", "extreme_mix"]
-
-    def __init__(self, row):
-        self.lo, self.hi = row["min_value"], row["max_value"]
-        self.min_n, self.max_n = row["min_n"], row["max_n"]
-        self.rng = random.Random(row["seed"])
-        self.cursor = 0
-        self.weights = {name: 1 for name in self.strategies}
-
-    def next(self):
-        if self.cursor < len(self.strategies):
-            name = self.strategies[self.cursor]
-            self.cursor += 1
-        else:
-            name = self.rng.choices(self.strategies, weights=[self.weights[x] for x in self.strategies], k=1)[0]
-        n = self.rng.randint(self.min_n, self.max_n)
-        lo, hi = self.lo, self.hi
-        if name == "random":
-            values = [self.rng.randint(lo, hi) for _ in range(n)]
-        elif name == "boundary":
-            pool = [lo, hi]
-            values = [pool[i % 2] for i in range(n)]
-        elif name == "all_equal":
-            pool = [lo, hi] + ([0] if lo <= 0 <= hi else [])
-            values = [self.rng.choice(pool)] * n
-        elif name == "increasing":
-            values = sorted(self.rng.randint(lo, hi) for _ in range(n))
-        elif name == "decreasing":
-            values = sorted((self.rng.randint(lo, hi) for _ in range(n)), reverse=True)
-        elif name == "many_duplicates":
-            pool = [self.rng.randint(lo, hi) for _ in range(min(3, n))]
-            values = [self.rng.choice(pool) for _ in range(n)]
-        else:
-            pool = [lo, hi] + ([0] if lo <= 0 <= hi else [])
-            values = [pool[i % len(pool)] for i in range(n)]
-        return name, values
-
-    def feedback(self, strategy, interesting):
-        if interesting:
-            self.weights[strategy] = min(8, self.weights[strategy] + 3)
+Generator = ArrayGenerator
 
 
 def sandbox_cmd(work, inner, memory_mb, cpu_seconds):
@@ -417,46 +380,9 @@ def differs(a, b):
 
 
 def minimize(values, predicate, lo, hi):
-    current, checks, granularity = values[:], 0, 2
-    while len(current) >= 2 and checks < MAX_MINIMIZE_CHECKS:
-        chunk = max(1, (len(current) + granularity - 1) // granularity)
-        reduced = False
-        for start in range(0, len(current), chunk):
-            candidate = current[:start] + current[start + chunk:]
-            if not candidate:
-                continue
-            checks += 1
-            if predicate(candidate):
-                current, reduced = candidate, True
-                granularity = max(2, granularity - 1)
-                break
-            if checks >= MAX_MINIMIZE_CHECKS:
-                break
-        if not reduced:
-            if granularity >= len(current):
-                break
-            granularity = min(len(current), granularity * 2)
-    for i in range(len(current)):
-        if checks >= MAX_MINIMIZE_CHECKS:
-            break
-        original = current[i]
-        candidates = [0, 1 if original > 0 else -1]
-        x = original
-        while abs(x) > 1:
-            x = x // 2 if x >= 0 else -((-x) // 2)
-            candidates.append(x)
-        for value in dict.fromkeys(candidates):
-            if value == current[i] or not lo <= value <= hi:
-                continue
-            candidate = current[:]
-            candidate[i] = value
-            checks += 1
-            if predicate(candidate):
-                current = candidate
-                break
-            if checks >= MAX_MINIMIZE_CHECKS:
-                break
-    return current, checks
+    return minimize_case(
+        values, predicate, lo, hi, max_checks=MAX_MINIMIZE_CHECKS
+    )
 
 
 def process_hunt(hunt_id):

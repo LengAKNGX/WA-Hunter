@@ -22,6 +22,18 @@ class WaHunterTests(unittest.TestCase):
         observed = [generator.next_case()[0] for _ in generator.STRATEGIES]
         self.assertEqual(observed, generator.STRATEGIES)
 
+    def test_generator_is_reproducible_from_seed(self):
+        cfg = {
+            "seed": 42, "min_n": 1, "max_n": 8,
+            "min_value": -10, "max_value": 10,
+        }
+        first = ArrayGenerator(cfg)
+        second = ArrayGenerator(cfg)
+        self.assertEqual(
+            [first.next_case() for _ in range(20)],
+            [second.next_case() for _ in range(20)],
+        )
+
     def test_minimize_deletes_and_shrinks(self):
         result, checks = minimize([8, 4, -99, 7], lambda a: any(x < 0 for x in a))
         self.assertEqual(result, [-1])

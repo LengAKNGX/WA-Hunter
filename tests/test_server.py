@@ -1,13 +1,13 @@
-import sys
 import unittest
-from pathlib import Path
 
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "server"))
-import app
+from server import app
+from server.core import ArrayGenerator
 
 
 class OracleValidationTests(unittest.TestCase):
+    def test_server_uses_shared_generator(self):
+        self.assertIs(app.Generator, ArrayGenerator)
+
     def test_accepts_bounded_cpp_oracle(self):
         result = app.validate_oracle({
             "supported": True,
@@ -51,6 +51,11 @@ class OracleValidationTests(unittest.TestCase):
         value = app.INT64_MIN
         result, _ = app.minimize([value], lambda a: a[0] <= -(2**62), value, app.INT64_MAX)
         self.assertEqual(result, [-(2**62)])
+
+    def test_server_minimizer_respects_check_budget(self):
+        values = list(range(30))
+        _, checks = app.minimize(values, lambda _: False, -100, 100)
+        self.assertLessEqual(checks, app.MAX_MINIMIZE_CHECKS)
 
     def test_large_n_reduces_iteration_budget(self):
         self.assertEqual(app.MAX_TEST_N, 100000)
