@@ -71,40 +71,38 @@ because it was launched through another interface. The duplication has been
 removed. Both interfaces now import the same implementation, and tests assert
 that the hosted alias points to the shared generator.
 
+The second refactoring step introduced `HuntEngine`. It owns the common
+generate/execute/compare/feedback/minimize loop and receives an executor callback.
+The CLI injects its local subprocess pair; the hosted worker injects its
+Firejail-backed pair. Search decisions are shared without weakening isolation.
+
 Deployment must copy `server/app.py` and `server/core.py` together. A deployment
 that updates only `app.py` is incomplete.
 
 ## Proposed next structural changes
 
-### 1. Explicit executor protocol
-
-Define one small interface such as `run(values) -> RunResult` and inject either a
-local or sandbox executor into a shared `HuntEngine`. This would remove the
-remaining duplicate orchestration loop without mixing security policy into the
-core.
-
-### 2. Evidence model
+### 1. Evidence model
 
 Create a versioned `HuntEvidence` structure containing authoritative constraints,
 seed, strategy counts, original input, minimized input, outputs, statuses, and
 Oracle review level. Markdown, HTML, and downloads should render from this one
 object instead of assembling conclusions independently.
 
-### 3. Versioned input schemas
+### 2. Versioned input schemas
 
 Replace hard-coded array assumptions with small, reviewed schema plugins. Start
 with `integer_array/v1`; later add strings or graphs only when each schema has a
 validator, generator, encoder, and shrinker. The model may propose a schema but
 must never bypass its deterministic validator.
 
-### 4. Repository boundary for infrastructure
+### 3. Repository boundary for infrastructure
 
 Keep production configuration, migrations, and deployment checks in explicit
 modules rather than allowing `app.py` to grow indefinitely. Good next splits are
 `storage.py`, `sandbox.py`, `oracle.py`, and `web.py`; they should be extracted
 only with characterization tests to avoid a large unsafe rewrite.
 
-### 5. Deployment contract test
+### 4. Deployment contract test
 
 Add a smoke test that starts the service exactly as systemd does, verifies the
 shared core import, submits a known faulty pair, and checks the resulting evidence.

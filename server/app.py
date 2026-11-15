@@ -21,9 +21,9 @@ from urllib.request import Request, urlopen
 from wsgiref.simple_server import WSGIServer, WSGIRequestHandler, make_server
 
 try:
-    from .core import ArrayGenerator, encode_case, minimize as minimize_case
+    from .core import ArrayGenerator, HuntEngine, encode_case, minimize as minimize_case
 except ImportError:  # Production executes app.py directly with core.py beside it.
-    from core import ArrayGenerator, encode_case, minimize as minimize_case
+    from core import ArrayGenerator, HuntEngine, encode_case, minimize as minimize_case
 
 BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("WAH_DB", BASE / "data" / "oj.db"))
@@ -390,33 +390,28 @@ def process_hunt(hunt_id):
         row = c.execute("SELECT * FROM hunts WHERE id=?", (hunt_id,)).fetchone()
     if not row:
         return
-    now = int(time.time())
     with tempfile.TemporaryDirectory(prefix=f"hunt-{hunt_id}-", dir=JOB_ROOT) as work:
         Path(work, "solution.cpp").write_text(row["solution_code"], encoding="utf-8")
         Path(work, "brute.cpp").write_text(row["brute_code"], encoding="utf-8")
         compile_pair(work)
-        generator = Generator(row)
-        for iteration in range(1, row["iterations"] + 1):
-            strategy, values = generator.next()
-            sol, brute = run_pair(work, values)
-            failed = differs(sol, brute)
-            generator.feedback(strategy, failed)
-            if not failed:
-                continue
-
-            def predicate(candidate):
-                candidate_sol, candidate_brute = run_pair(work, candidate)
-                return differs(candidate_sol, candidate_brute)
-
-            minimized, checks = minimize(values, predicate, row["min_value"], row["max_value"])
-            sol, brute = run_pair(work, minimized)
+        engine = HuntEngine(
+            row,
+            lambda values: run_pair(work, values),
+            differs,
+            max_minimize_checks=MAX_MINIMIZE_CHECKS,
+        )
+        outcome = engine.run(row["iterations"])
+        if outcome.found:
             with db() as c:
                 c.execute("""UPDATE hunts SET status='found',strategy=?,found_iteration=?,
                     original_case=?,counterexample=?,solution_status=?,brute_status=?,
                     solution_output=?,brute_output=?,detail=?,minimize_checks=?,updated_at=? WHERE id=?""",
-                    (strategy, iteration, case_text(values), case_text(minimized), sol["status"],
-                     brute["status"], sol["output"][:4000], brute["output"][:4000],
-                     f"从 {len(values)} 个元素缩减到 {len(minimized)} 个元素", checks, now, hunt_id))
+                    (outcome.strategy, outcome.iteration, case_text(outcome.original),
+                     case_text(outcome.minimized), outcome.solution["status"],
+                     outcome.brute["status"], outcome.solution["output"][:4000],
+                     outcome.brute["output"][:4000],
+                     f"从 {len(outcome.original)} 个元素缩减到 {len(outcome.minimized)} 个元素",
+                     outcome.minimize_checks, int(time.time()), hunt_id))
             return
     with db() as c:
         c.execute("UPDATE hunts SET status='not_found',detail=?,updated_at=? WHERE id=?",

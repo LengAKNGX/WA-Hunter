@@ -8,13 +8,52 @@ and production worker from silently developing different search semantics.
 from __future__ import annotations
 
 import random
+import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
 
 
 STRATEGIES = (
     "random", "boundary", "all_equal", "increasing", "decreasing",
     "many_duplicates", "extreme_mix",
 )
+
+
+def _status(result: Any) -> str:
+    return result["status"] if isinstance(result, Mapping) else result.status
+
+
+@dataclass
+class SearchStats:
+    cases: int = 0
+    total_elements: int = 0
+    max_n: int = 0
+    strategy_counts: dict[str, int] = field(default_factory=dict)
+    solution_non_ok: int = 0
+    brute_non_ok: int = 0
+    elapsed_ms: float = 0.0
+
+    def record(self, strategy: str, values: list[int], solution: Any, brute: Any) -> None:
+        self.cases += 1
+        self.total_elements += len(values)
+        self.max_n = max(self.max_n, len(values))
+        self.strategy_counts[strategy] = self.strategy_counts.get(strategy, 0) + 1
+        self.solution_non_ok += _status(solution) != "ok"
+        self.brute_non_ok += _status(brute) != "ok"
+
+
+@dataclass
+class HuntOutcome:
+    found: bool
+    stats: SearchStats
+    strategy: str = ""
+    iteration: int = 0
+    original: list[int] = field(default_factory=list)
+    minimized: list[int] = field(default_factory=list)
+    solution: Any = None
+    brute: Any = None
+    minimize_checks: int = 0
 
 
 def encode_case(values: list[int]) -> str:
@@ -146,3 +185,71 @@ def minimize(
             if not budget_available():
                 break
     return current, checks
+
+
+class HuntEngine:
+    """Interface-neutral generate/execute/compare/minimize agent loop."""
+
+    def __init__(
+        self,
+        config: Mapping,
+        runner: Callable[[list[int]], tuple[Any, Any]],
+        compare: Callable[[Any, Any], bool],
+        *,
+        max_minimize_checks: int | None = None,
+    ):
+        self.config = config
+        self.runner = runner
+        self.compare = compare
+        self.max_minimize_checks = max_minimize_checks
+
+    def run(
+        self,
+        iterations: int,
+        on_case: Callable[[int, str, list[int], Any, Any, bool], None] | None = None,
+    ) -> HuntOutcome:
+        generator = ArrayGenerator(self.config)
+        stats = SearchStats()
+        started = time.perf_counter()
+
+        for iteration in range(1, iterations + 1):
+            strategy, values = generator.next_case()
+            solution, brute = self.runner(values)
+            failed = self.compare(solution, brute)
+            stats.record(strategy, values, solution, brute)
+            generator.feedback(
+                strategy,
+                failed or _status(solution) != "ok" or _status(brute) != "ok",
+            )
+            if on_case:
+                on_case(iteration, strategy, values, solution, brute, failed)
+            if not failed:
+                continue
+
+            def still_fails(candidate: list[int]) -> bool:
+                candidate_solution, candidate_brute = self.runner(candidate)
+                return self.compare(candidate_solution, candidate_brute)
+
+            minimized, checks = minimize(
+                values,
+                still_fails,
+                self.config["min_value"],
+                self.config["max_value"],
+                max_checks=self.max_minimize_checks,
+            )
+            final_solution, final_brute = self.runner(minimized)
+            stats.elapsed_ms = (time.perf_counter() - started) * 1000
+            return HuntOutcome(
+                found=True,
+                stats=stats,
+                strategy=strategy,
+                iteration=iteration,
+                original=values,
+                minimized=minimized,
+                solution=final_solution,
+                brute=final_brute,
+                minimize_checks=checks,
+            )
+
+        stats.elapsed_ms = (time.perf_counter() - started) * 1000
+        return HuntOutcome(found=False, stats=stats)

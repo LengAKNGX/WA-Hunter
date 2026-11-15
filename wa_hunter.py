@@ -10,10 +10,10 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from server.core import ArrayGenerator, encode_case, minimize
+from server.core import ArrayGenerator, HuntEngine, SearchStats, encode_case, minimize
 
 
 @dataclass
@@ -24,24 +24,7 @@ class RunResult:
     elapsed_ms: float
 
 
-@dataclass
-class HuntStats:
-    """Small, deterministic telemetry used to explain what a hunt actually covered."""
-
-    cases: int = 0
-    total_elements: int = 0
-    max_n: int = 0
-    strategy_counts: dict[str, int] = field(default_factory=dict)
-    solution_non_ok: int = 0
-    brute_non_ok: int = 0
-
-    def record(self, strategy: str, values: list[int], sol: RunResult, brute: RunResult) -> None:
-        self.cases += 1
-        self.total_elements += len(values)
-        self.max_n = max(self.max_n, len(values))
-        self.strategy_counts[strategy] = self.strategy_counts.get(strategy, 0) + 1
-        self.solution_non_ok += sol.status != "ok"
-        self.brute_non_ok += brute.status != "ok"
+HuntStats = SearchStats  # Backward-compatible public name used by existing reports/tests.
 
 
 def coverage_markdown(stats: HuntStats, elapsed_ms: float) -> str:
@@ -210,48 +193,38 @@ def main() -> int:
     compile_cpp(root / args.solution, solution_exe, cfg)
     compile_cpp(root / args.brute, brute_exe, cfg)
 
-    generator = ArrayGenerator(cfg)
-    stats, hunt_start = HuntStats(), time.perf_counter()
-    for iteration in range(1, cfg["iterations"] + 1):
-        strategy, values = generator.next_case()
-        sol = run_program(solution_exe, values, cfg["timeout_seconds"])
-        brute = run_program(brute_exe, values, cfg["timeout_seconds"])
-        stats.record(strategy, values, sol, brute)
-        failed = differs(sol, brute)
-        generator.feedback(strategy, failed or sol.status != "ok" or brute.status != "ok")
+    def run_pair(values: list[int]) -> tuple[RunResult, RunResult]:
+        return (
+            run_program(solution_exe, values, cfg["timeout_seconds"]),
+            run_program(brute_exe, values, cfg["timeout_seconds"]),
+        )
+
+    def log_case(iteration, strategy, values, _solution, _brute, failed):
         if should_log_iteration(iteration, failed, cfg["progress_interval"]):
             print(
                 f"[agent] iteration={iteration} strategy={strategy} "
                 f"n={len(values)} result={'DIFF' if failed else 'same'}"
             )
-        if not failed:
-            continue
 
-        def still_fails(candidate: list[int]) -> bool:
-            return differs(run_program(solution_exe, candidate, cfg["timeout_seconds"]),
-                           run_program(brute_exe, candidate, cfg["timeout_seconds"]))
-
-        minimized, checks = minimize(
-            values, still_fails, cfg["min_value"], cfg["max_value"]
-        )
-        final_sol = run_program(solution_exe, minimized, cfg["timeout_seconds"])
-        final_brute = run_program(brute_exe, minimized, cfg["timeout_seconds"])
+    outcome = HuntEngine(cfg, run_pair, differs).run(cfg["iterations"], log_case)
+    if outcome.found:
         counterexample = root / cfg["counterexample"]
         report = root / cfg["report"]
-        counterexample.write_text(encode_case(minimized), encoding="utf-8")
-        elapsed_ms = (time.perf_counter() - hunt_start) * 1000
+        counterexample.write_text(encode_case(outcome.minimized), encoding="utf-8")
         write_report(
-            report, values, minimized, strategy, iteration, final_sol, final_brute,
-            checks, cfg, stats, elapsed_ms,
+            report, outcome.original, outcome.minimized, outcome.strategy,
+            outcome.iteration, outcome.solution, outcome.brute,
+            outcome.minimize_checks, cfg, outcome.stats, outcome.stats.elapsed_ms,
         )
-        print(f"[agent] minimized {len(values)} -> {len(minimized)} elements ({checks} checks)")
+        print(
+            f"[agent] minimized {len(outcome.original)} -> {len(outcome.minimized)} "
+            f"elements ({outcome.minimize_checks} checks)"
+        )
         print(f"[agent] saved {counterexample} and {report}")
         return 1
 
     report = root / cfg["report"]
-    write_no_difference_report(
-        report, cfg, stats, (time.perf_counter() - hunt_start) * 1000
-    )
+    write_no_difference_report(report, cfg, outcome.stats, outcome.stats.elapsed_ms)
     print(f"[agent] no discrepancy found; saved {report}")
     return 0
 

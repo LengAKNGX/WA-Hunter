@@ -118,7 +118,8 @@ Issue、附件和评论默认公开。不要上传私有作业、比赛中仍保
 ## 在线服务 / Hosted service
 
 核心搜索算法位于 `server/core.py`，由本地 CLI 和线上 Worker 共同调用。该模块不
-依赖数据库、Web、子进程或第三方库，只负责确定性的数组生成、输入编码和反例最小化。
+依赖数据库、Web、子进程或第三方库，只负责确定性的数组生成、输入编码、共享
+`HuntEngine` 编排和反例最小化。
 执行环境分别由 CLI 本地适配器和服务端 Firejail 适配器负责，避免安全代码与搜索
 算法互相耦合。详细分层见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
