@@ -1,0 +1,265 @@
+\documentclass[10pt,a4paper]{ctexart}
+\usepackage[top=1.65cm,bottom=1.75cm,left=1.8cm,right=1.8cm,headheight=18pt,headsep=4pt,footskip=18pt]{geometry}
+\usepackage[table]{xcolor}
+\usepackage{booktabs,tabularx,array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{listings}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,fit,calc}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\usepackage[most]{tcolorbox}
+
+\definecolor{navy}{HTML}{17365D}
+\definecolor{blue}{HTML}{2F75B5}
+\definecolor{lightblue}{HTML}{EAF2F8}
+\definecolor{graytext}{HTML}{4F5B66}
+\definecolor{linegray}{HTML}{D8DEE4}
+\definecolor{codebg}{HTML}{F6F8FA}
+\definecolor{green}{HTML}{2E7D32}
+
+\setmainfont{TeX Gyre Pagella}
+\setsansfont{TeX Gyre Heros}
+\setmonofont{DejaVu Sans Mono}
+\setCJKmainfont{FandolSong-Regular}
+\setCJKsansfont{FandolHei-Regular}
+\setCJKmonofont{FandolFang-Regular}
+
+\hypersetup{pdftitle={WA Hunter Week 7--8 工作报告},pdfauthor={WA Hunter 项目组}}
+\setlength{\parindent}{1.5em}
+\setlength{\parskip}{1.5pt}
+\linespread{1.055}
+\setlist[itemize]{leftmargin=1.7em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
+\setlist[enumerate]{leftmargin=1.8em,itemsep=0pt,parsep=0pt,topsep=2pt,partopsep=0pt}
+\renewcommand{\arraystretch}{1.04}
+\setlength{\tabcolsep}{5pt}
+
+\titleformat{\section}{\large\bfseries\color{navy}}{\colorbox{blue}{\makebox[1.65em][c]{\color{white}\thesection}}}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{blue}}{\textcolor{blue}{\rule{0.32em}{0.32em}}\hspace{0.35em}\thesubsection}{0.45em}{}
+\titlespacing*{\section}{0pt}{0.9em}{0.35em}
+\titlespacing*{\subsection}{0pt}{0.65em}{0.2em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\sffamily\scriptsize\color{graytext}WA Hunter · Data Structures \& Algorithms II}
+\fancyhead[R]{}
+\fancyfoot[C]{\sffamily\scriptsize\color{graytext}\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\headrule}{\hbox to\headwidth{\color{linegray}\leaders\hrule height \headrulewidth\hfill}}
+
+\lstset{basicstyle=\ttfamily\small,backgroundcolor=\color{codebg},frame=single,rulecolor=\color{linegray},breaklines=true,columns=fullflexible,xleftmargin=0.5em,xrightmargin=0.5em,aboveskip=0.5em,belowskip=0.5em}
+\newcommand{\code}[1]{\texttt{#1}}
+\newenvironment{resultbox}[2]{%
+  \begin{tcolorbox}[enhanced,breakable,colback=lightblue,colframe=blue,boxrule=0pt,
+    borderline west={2.5pt}{0pt}{blue},arc=1.5mm,left=2.8mm,right=2.8mm,
+    top=1.8mm,bottom=1.8mm,before skip=4pt,after skip=5pt]
+  {\small\bfseries\color{navy}#1}\hfill{\scriptsize\color{blue}#2}\par\smallskip
+  \color{graytext}\small
+}{\end{tcolorbox}}
+
+\begin{document}
+
+\begin{tcolorbox}[enhanced,colback=navy,colframe=navy,arc=4mm,boxrule=0pt,
+  left=9mm,right=9mm,top=7mm,bottom=7mm,before skip=2pt,after skip=8pt,
+  overlay={\fill[blue] (frame.south west) rectangle ([xshift=5mm]frame.north west);}]
+{\sffamily\bfseries\fontsize{22}{27}\selectfont\color{white}WA Hunter\par}
+\vspace{0.15em}
+{\sffamily\bfseries\fontsize{16}{20}\selectfont\color{white}Week 7--8 工作报告\par}
+\vspace{0.55em}
+{\small\color{white!92}共享搜索核心、统一 Agent 编排与系统分层重构\par}
+\vspace{0.45em}
+{\footnotesize\color{white!70}消除重复 \quad·\quad 行为一致 \quad·\quad 执行器注入 \quad·\quad 架构演进}
+\end{tcolorbox}
+\small
+
+\section{阶段概述}
+
+此前 WA Hunter 已同时提供本地 CLI 与线上 Web 服务，但两个入口分别维护测试生成器、反例最小化器以及 Agent 搜索循环。随着项目继续演进，这种重复实现已经造成策略行为差异，也提高了新增功能和部署维护的成本。
+
+本阶段没有增加新的业务页面，而是完成两步结构重构：首先把确定性的生成与最小化算法抽为共享核心；随后引入共享 \code{HuntEngine}，统一“生成、执行、比较、反馈、最小化”的 Agent 编排流程。不同入口只需注入自己的执行器。
+
+\begin{resultbox}{本阶段核心成果}{从“两个相似系统”重构为“一个搜索引擎、两个执行环境”}
+CLI 与 Web 现在共享搜索语义和 Agent 决策流程；本地仍使用普通子进程，线上仍使用 Firejail、低权限账户和资源限制，结构统一没有削弱安全边界。
+\end{resultbox}
+
+\section{原有结构问题}
+
+\subsection{生成器与最小化器重复}
+
+\code{wa\_hunter.py} 与 \code{server/app.py} 都包含七种生成策略、反馈权重和 Delta Debugging。两套代码表面相似，但 \code{boundary} 策略已经出现差异：CLI 优先构造全负边界数据，服务端则交替使用上下界。
+
+这意味着相同的 seed 与约束可能因为入口不同而产生不同测试序列，影响复现和报告可信度。
+
+\subsection{Agent 编排循环重复}
+
+即使生成器合并，本地和线上仍分别编写“取测试、运行两份程序、判断差异、调整权重、执行最小化”的循环。以后加入覆盖反馈或变形测试时，仍可能再次发生行为漂移。
+
+\subsection{服务端职责过多}
+
+\code{server/app.py} 同时负责 HTTP、数据库、AI Oracle、任务队列、沙箱执行、搜索算法、支付和报告。继续在其中直接增加新题型会降低可测试性，也使安全逻辑与算法逻辑互相影响。
+
+\subsection{部署单元不明确}
+
+过去线上更新通常只替换 \code{app.py}。抽出共享模块后，如果部署时遗漏 \code{core.py}，服务会在启动阶段导入失败，因此代码边界必须对应明确的部署契约。
+
+\section{第一步：共享确定性核心}
+
+新增 \code{server/core.py}，集中维护：
+
+\begin{itemize}
+  \item 七种测试策略的唯一注册表；
+  \item 固定随机种子的数组生成；
+  \item 基于反馈的策略权重调整；
+  \item 数组输入编码；
+  \item 分块删除式 Delta Debugging；
+  \item 数值收缩与可选检查次数上限。
+\end{itemize}
+
+共享核心不导入数据库、HTTP、子进程、DeepSeek 或支付代码。它只负责确定性搜索原语，因此能够快速单元测试，也可以被多个入口安全复用。
+
+\begin{table}[htbp]
+\centering\footnotesize
+\rowcolors{2}{lightblue!65}{white}
+\begin{tabularx}{0.94\textwidth}{>{\bfseries\color{navy}}p{0.22\textwidth} X X}
+\toprule
+职责 & 重构前 & 重构后 \\
+\midrule
+策略注册 & CLI、Web 各一份 & \code{core.py} 唯一来源 \\
+随机生成 & 两套相似实现 & 相同 seed 保证相同序列 \\
+反例缩减 & 两套 Delta Debugging & 共享实现，可注入检查预算 \\
+安全执行 & 与服务逻辑混杂 & 保留在执行适配器中 \\
+部署要求 & 主要关注 \code{app.py} & \code{app.py} 与 \code{core.py} 同步 \\
+\bottomrule
+\end{tabularx}
+\rowcolors{2}{}{}
+\caption{共享核心重构前后对比}
+\end{table}
+
+\section{第二步：共享 HuntEngine}
+
+\code{HuntEngine} 统一负责以下循环：
+
+\begin{lstlisting}
+generate -> execute -> compare -> feedback -> minimize
+\end{lstlisting}
+
+它不直接启动进程，而是接收执行器回调：
+
+\begin{lstlisting}
+runner(values) -> (solution_result, oracle_result)
+\end{lstlisting}
+
+CLI 注入本地 subprocess 执行器，线上 Worker 注入 Firejail 执行器。引擎只读取统一的状态和输出，不需要知道程序实际在哪种环境中运行。
+
+共享引擎同时返回统一结果对象，其中包含是否找到差异、发现策略、迭代位置、原始和最小反例、程序结果、最小化次数及搜索统计。这为后续统一证据模型奠定了基础。
+
+\section{重构后的系统分层}
+
+\begin{figure}[htbp]
+\centering
+\resizebox{0.98\textwidth}{!}{\begin{tikzpicture}[
+  node distance=6mm and 8mm,
+  box/.style={draw=blue,rounded corners=3pt,fill=lightblue,minimum width=3.4cm,minimum height=9mm,align=center,font=\scriptsize},
+  core/.style={draw=navy,rounded corners=3pt,fill=navy,text=white,minimum width=3.8cm,minimum height=10mm,align=center,font=\scriptsize\bfseries},
+  arrow/.style={-{Latex[length=2mm]},thick,color=graytext}
+]
+\node[box] (cli) {CLI 接口\\本地报告};
+\node[box,right=35mm of cli] (web) {Web / 管理员接口\\支付与交付};
+\node[core,below=of $(cli)!0.5!(web)$] (engine) {共享 HuntEngine\\生成 · 比较 · 反馈 · 最小化};
+\node[box,below left=8mm and 3mm of engine] (local) {本地执行器\\subprocess + timeout};
+\node[box,below right=8mm and 3mm of engine] (sandbox) {线上执行器\\Firejail + prlimit + 禁网};
+\node[box,below=of engine,yshift=-18mm] (state) {线上状态层\\SQLite · 队列 · 审核 · 付款};
+\draw[arrow] (cli)--(engine); \draw[arrow] (web)--(engine);
+\draw[arrow] (engine)--(local); \draw[arrow] (engine)--(sandbox);
+\draw[arrow] (web)--(state); \draw[arrow] (sandbox)--(state);
+\end{tikzpicture}}
+\caption{共享引擎与双执行适配器架构}
+\end{figure}
+
+该分层遵循三个原则：搜索语义应统一，执行安全策略应隔离，业务状态应独立持久化。
+
+\section{兼容性与部署约束}
+
+重构保留了旧接口别名，例如 CLI 仍可导入 \code{minimize} 和 \code{HuntStats}，避免已有测试或脚本立即失效。测试过程中曾发现旧测试无法导入 \code{minimize}，随后通过兼容导出修复，这也说明结构重构必须关注外部调用契约。
+
+线上部署时，\code{server/app.py} 与 \code{server/core.py} 必须作为一个单元同时更新。服务端入口同时支持包导入和直接执行，适应测试环境与 systemd 生产启动方式。
+
+\begin{resultbox}{部署原则}{结构重构尚未直接部署到线上服务器}
+正式部署应先备份数据库，再同步两个服务文件，执行 Python 编译检查、共享核心导入检查、已知错误任务烟雾测试、systemd 状态检查和 HTTPS 健康检查。
+\end{resultbox}
+
+\section{验证结果}
+
+本阶段执行：
+
+\begin{lstlisting}
+python -m unittest discover -s tests -v
+python -m py_compile wa_hunter.py server/app.py server/core.py
+python wa_hunter.py
+python wa_hunter.py --solution demo/buggy_solution.cpp \
+  --brute examples/brute.cpp --config demo/config.json
+\end{lstlisting}
+
+\begin{table}[htbp]
+\centering\footnotesize
+\rowcolors{2}{lightblue!65}{white}
+\begin{tabularx}{0.9\textwidth}{>{\bfseries\color{navy}}p{0.34\textwidth} X}
+\toprule
+验证项 & 结果 \\
+\midrule
+自动化测试 & 21 项全部通过 \\
+Python 编译检查 & CLI、服务端与共享核心均通过 \\
+正确示例 & 完成 200 轮，正常输出未找到报告 \\
+错误 Demo & 第 1 轮发现差异 \\
+反例最小化 & 从 6 个元素缩减为 3 个 \\
+报告输出 & 反例、程序行为与策略统计完整生成 \\
+\bottomrule
+\end{tabularx}
+\rowcolors{2}{}{}
+\caption{结构重构验证结果}
+\end{table}
+
+新增测试重点验证：相同 seed 的序列复现、服务端使用共享生成器、线上最小化预算、执行器注入、成功发现路径和预算耗尽路径。
+
+\section{进一步结构设想}
+
+以下内容尚未实现，用于指导后续迭代。
+
+\subsection{版本化 HuntEvidence}
+
+设计统一证据对象，集中保存权威约束、seed、策略统计、原始和最小反例、程序状态、Oracle 审核等级与任务耗时。HTML、Markdown 和下载文件都从同一对象渲染，避免结果描述不一致。
+
+\subsection{输入 Schema 插件化}
+
+将当前数组输入定义为 \code{integer\_array/v1}。每个新 Schema 必须同时提供约束验证器、生成器、编码器和缩减器。未来的字符串或图输入不再通过主程序中的大量条件分支接入。
+
+\subsection{基础设施继续拆分}
+
+在行为测试保护下，将 \code{server/app.py} 逐步拆分为 \code{storage.py}、\code{sandbox.py}、\code{oracle.py} 和 \code{web.py}。不进行一次性重写，优先拆出边界明确、容易测试的模块。
+
+\subsection{部署契约测试}
+
+使用与 systemd 相同的方式启动临时服务，验证共享核心导入、任务状态流转、已知错误反例、报告下载和 Firejail 隔离，防止“本地测试通过但部署包不完整”。
+
+\section{阶段价值与下一步}
+
+本阶段删除了两套重复算法和编排逻辑，把项目从“CLI 与 Web 两个相似实现”调整为“一个搜索引擎、两个执行适配器”。这不会直接增加页面功能，却显著降低后续增加覆盖反馈、变形测试和新输入类型时的重复成本。
+
+下一阶段计划：
+\begin{enumerate}
+  \item 设计 \code{HuntEvidence}，暂不迁移历史数据库；
+  \item 为部署包增加完整性检查和线上烟雾测试；
+  \item 将策略统计持久化到线上任务表；
+  \item 受控部署本轮重构并检查服务健康；
+  \item 继续推进真实用户任务与第一笔 1 CNY 商业验证。
+\end{enumerate}
+
+\section{阶段结论}
+
+Week 7--8 完成了 WA Hunter 的核心分层重构。CLI 与线上服务现在共享确定性搜索原语和完整 Agent 编排流程，同时保留不同的执行安全模型。
+
+本轮工作解决了算法重复、行为漂移和部署边界不清的问题，并通过 21 项测试、正确示例和故意错误 Demo 验证。项目下一步应把统一结果进一步提升为统一证据模型，并通过受控部署验证新的模块边界。
+
+\end{document}
